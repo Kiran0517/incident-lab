@@ -22,11 +22,20 @@ public class InventoryService {
     }
 
     /**
-     * Atomically decrements stock only if enough is available, then records the reservation.
+     * Reserves stock for an order.
+     * Idempotent: if this order already has a reservation (e.g. the caller retried),
+     * returns success without reserving again.
      * The conditional UPDATE avoids a read-then-write race between concurrent orders.
      */
     @Transactional
     public boolean reserve(String orderRef, String sku, int qty) {
+        Integer existing = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM reservations WHERE order_ref = ?", Integer.class, orderRef);
+        if (existing != null && existing > 0) {
+            log.info("Duplicate reservation request ignored orderRef={}", orderRef);
+            return true;
+        }
+
         int updated = jdbc.update(
                 "UPDATE products SET stock = stock - ? WHERE sku = ? AND stock >= ?", qty, sku, qty);
         if (updated == 0) {
