@@ -49,12 +49,19 @@ services:
       <<: [*otel-env, *db-env]
       OTEL_SERVICE_NAME: order-service
       INVENTORY_URL: http://inventory-service:8082
-      PAYMENT_URL: http://payment-service:8083
+      PAYMENT_URL: http://toxiproxy:8666
     ports: ["8081:8081"]
     depends_on:
       postgres: { condition: service_healthy }
       inventory-service: { condition: service_started }
       payment-service: { condition: service_started }
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: [./observability/toxiproxy.json:/config/toxiproxy.json:ro]
+    ports: ["8474:8474"]
+    depends_on: [payment-service]
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
