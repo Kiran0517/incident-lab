@@ -12,8 +12,7 @@ CREATE TABLE IF NOT EXISTS reservations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Dropped idx_reservations_order_ref: write-heavy table, index adds insert overhead.
-DROP INDEX IF EXISTS idx_reservations_order_ref;
+CREATE INDEX IF NOT EXISTS idx_reservations_order_ref ON reservations (order_ref);
 
 INSERT INTO products (sku, name, stock) VALUES
     ('SKU-1001', 'Mechanical Keyboard', 100000),
