@@ -1,6 +1,7 @@
 package com.incidentlab.order;
 
 import java.math.BigDecimal;
+import java.net.ConnectException;
 import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -11,7 +12,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientException;
 
 @Service
 public class OrderService {
@@ -32,8 +32,13 @@ public class OrderService {
 
     /**
      * Flow: create PENDING order -> reserve stock -> capture payment -> CONFIRMED.
-     * Known gap (intentional for now): if payment fails after stock is reserved,
-     * the reservation is not released. A saga/compensation step is a planned improvement.
+     *
+     * Every exit path sets a final status, so no order is left PENDING.
+     * Incident (Day 2): a read timeout surfaced as CancellationException, which the old
+     * catch (RestClientException) missed, leaving 119 orders PENDING after they were charged.
+     *
+     * Known gap: if payment fails after stock is reserved, the reservation is not released
+     * (saga/compensation planned).
      */
     public OrderResult placeOrder(CreateOrderRequest req) {
         String orderRef = UUID.randomUUID().toString();
@@ -51,7 +56,7 @@ public class OrderService {
             updateStatus(orderRef, "REJECTED");
             log.warn("Order rejected: insufficient stock orderRef={} sku={}", orderRef, req.sku());
             return new OrderResult(orderRef, "REJECTED");
-        } catch (RestClientException e) {
+        } catch (RuntimeException e) {
             updateStatus(orderRef, "FAILED");
             log.error("Inventory call failed orderRef={}", orderRef, e);
             throw new DownstreamException("inventory-service", e);
@@ -64,9 +69,22 @@ public class OrderService {
                     .body(Map.of("orderRef", orderRef, "amount", req.amount()))
                     .retrieve()
                     .toBodilessEntity();
-        } catch (RestClientException e) {
+        } catch (HttpClientErrorException e) {
+            // Payment explicitly rejected the request (4xx): the card was not charged.
             updateStatus(orderRef, "FAILED");
-            log.error("Payment call failed orderRef={}", orderRef, e);
+            log.error("Payment rejected orderRef={} status={}", orderRef, e.getStatusCode(), e);
+            throw new DownstreamException("payment-service", e);
+        } catch (RuntimeException e) {
+            if (isConnectFailure(e)) {
+                // Could not even connect: payment never received the request, so no charge happened.
+                updateStatus(orderRef, "FAILED");
+                log.error("Payment call failed (could not connect) orderRef={}", orderRef, e);
+            } else {
+                // Request was sent but no answer arrived in time: the charge may have happened.
+                // A timeout is not a failure; the outcome is unknown and must be reconciled.
+                updateStatus(orderRef, "PAYMENT_UNKNOWN");
+                log.error("Payment outcome unknown, needs reconciliation orderRef={}", orderRef, e);
+            }
             throw new DownstreamException("payment-service", e);
         }
 
@@ -82,6 +100,16 @@ public class OrderService {
 
     private void updateStatus(String orderRef, String status) {
         jdbc.update("UPDATE orders SET status = ? WHERE order_ref = ?", status, orderRef);
+    }
+
+    /** True if the root cause was a refused/failed TCP connection (request never sent). */
+    private static boolean isConnectFailure(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof ConnectException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public record CreateOrderRequest(String sku, int qty, BigDecimal amount) {}
