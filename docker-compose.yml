@@ -84,5 +84,19 @@ services:
     ports: ["3000:3000"]
     depends_on: [prometheus, jaeger]
 
+  investigator:
+    build: ./investigator
+    profiles: ["tools"]
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      JAEGER_URL: http://jaeger:16686
+      DB_DSN: postgresql://shop:shop@postgres:5432/shop
+      REPO_PATH: /repo
+      COMPOSE_PROJECT: incident-lab
+    volumes:
+      - ./:/repo:ro
+      - ./investigator/investigator:/app/investigator:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
 volumes:
   pgdata:
