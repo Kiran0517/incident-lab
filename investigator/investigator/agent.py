@@ -131,7 +131,7 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 8) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise SystemExit("GEMINI_API_KEY is not set. Add it to the .env file in the project root.")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     client = GeminiClient(api_key, model)
     declarations = _declarations()
 
