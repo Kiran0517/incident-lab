@@ -48,7 +48,7 @@ def _summarize(points, max_samples: int = 8) -> dict:
         "avg": round(sum(values) / len(values), 3),
         "last": round(values[-1], 3),
         "peak_at": _iso(peak_ts),
-        "samples": [] if min(values) == peak else [[_iso(t), round(v, 3)] for t, v in points[::stride]],
+        "samples": [] if min(values) == peak else [f"{_iso(t)[11:19]} {round(v, 2)}" for t, v in points[::stride]],
     }
 
 
