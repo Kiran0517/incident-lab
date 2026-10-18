@@ -93,9 +93,12 @@ services:
       DB_DSN: postgresql://shop:shop@postgres:5432/shop
       REPO_PATH: /repo
       COMPOSE_PROJECT: incident-lab
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
     volumes:
       - ./:/repo:ro
       - ./investigator/investigator:/app/investigator:ro
+      - ./investigations:/app/investigations
       - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
