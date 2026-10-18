@@ -10,6 +10,14 @@ from ..config import JAEGER_URL
 
 TRACE_ID_RE = re.compile(r"^[0-9a-fA-F]{16,32}$")
 
+# Each service's main business endpoint. Searching by operation makes Jaeger filter
+# server-side, so monitoring scrapes (GET /actuator/prometheus every 5s) never crowd out real requests.
+DEFAULT_OPERATIONS = {
+    "order-service": "POST /orders",
+    "inventory-service": "POST /inventory/reserve",
+    "payment-service": "POST /payments",
+}
+
 
 def _iso_us(us: int) -> str:
     return datetime.fromtimestamp(us / 1e6, tz=timezone.utc).isoformat(timespec="milliseconds")
@@ -38,11 +46,13 @@ def _summarize_trace(trace: dict):
     children = [s for s in spans if s is not root] or spans
     slowest = max(children, key=lambda s: s["duration"])
     errors = [s for s in spans if _is_error(_tags(s))]
+    root_tags = _tags(root)
     return {
         "trace_id": trace["traceID"],
         "start": _iso_us(start),
         "duration_ms": round((end - start) / 1000, 2),
         "root": f"{svc(root)} {root['operationName']}",
+        "http_status": root_tags.get("http.response.status_code") or root_tags.get("http.status_code"),
         "span_count": len(spans),
         "services": sorted({svc(s) for s in spans}),
         "has_error": bool(errors),
@@ -56,29 +66,35 @@ def _summarize_trace(trace: dict):
 
 
 def find_traces(service: str, minutes: int = 15, min_duration_ms: int = None,
-                errors_only: bool = False, limit: int = 10) -> dict:
+                errors_only: bool = False, limit: int = 10, operation: str = None) -> dict:
     """Finds recent request traces for a service, slowest first."""
+    op = operation or DEFAULT_OPERATIONS.get(service)
     end_us = int(time.time() * 1e6)
     params = {
         "service": service,
         "start": end_us - minutes * 60 * 1_000_000,
         "end": end_us,
-        "limit": max(limit * 20, 200),
+        "limit": max(limit * 5, 50),
     }
+    if op:
+        params["operation"] = op
     if min_duration_ms:
         params["minDuration"] = f"{int(min_duration_ms)}ms"
     if errors_only:
         params["tags"] = json.dumps({"error": "true"})
-    resp = requests.get(f"{JAEGER_URL}/api/traces", params=params, timeout=15)
+    resp = requests.get(f"{JAEGER_URL}/api/traces", params=params, timeout=20)
     resp.raise_for_status()
-    traces = [t for t in (_summarize_trace(t) for t in resp.json().get("data") or []) if t and "/actuator" not in t["root"]]
+    traces = [t for t in (_summarize_trace(t) for t in resp.json().get("data") or []) if t]
     traces.sort(key=lambda t: t["duration_ms"], reverse=True)
     return {
         "service": service,
+        "operation": op,
         "window_minutes": minutes,
         "filters": {"min_duration_ms": min_duration_ms, "errors_only": errors_only},
         "traces_found": len(traces),
         "traces": traces[:limit],
+        "notes": ["http_status 409 on POST /orders means the order was rejected (e.g. unknown SKU): "
+                  "a business outcome, not a system failure."],
     }
 
 
