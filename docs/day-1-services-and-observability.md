@@ -1,8 +1,20 @@
-# Incident Lab: Engineering Notes
+# Day 1 Report: Building the System and Its "Security Cameras"
 
-These notes explain what I built, why I built it this way, and what I learned along the way.
-They are written so that anyone can follow them, with or without a technical background.
-Each answer starts with a plain-English explanation and then gives the technical detail.
+> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md)
+>
+> **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
+
+## The short version
+
+- I built a small online store made of **three separate programs** (an order desk, a warehouse,
+  and a cashier) that talk to each other, all sharing one database.
+- I added **monitoring** so every request can be followed step by step, every service reports its
+  speed and error rates, and every log line is tagged with the request it belongs to.
+- I answered five design questions (below) that explain why the code is written the way it is.
+  These are the same questions interviewers ask about real systems.
+- Result: one order takes about **12.5 milliseconds** (1/80th of a second) and passes through all
+  three services. This "healthy" picture is the baseline for everything that follows.
+
 
 ---
 
@@ -286,11 +298,10 @@ assistant's job will be to spot exactly which one and explain why.
 
 ---
 
-## Next: Day 2
+## What happened next
 
-Introduce three real, repeatable failures and observe how each one appears in the evidence:
+On Day 2, I deliberately broke this system in realistic ways while it handled heavy traffic, and
+investigated each failure like an on-call engineer. The system also failed in four ways I did not
+plan, which turned out to be the most valuable findings.
 
-1. **Database connection pool exhaustion:** the warehouse runs out of "phone lines" to the
-   filing cabinet under heavy load.
-2. **A bad code release:** a change removes a database index, making lookups dramatically slower.
-3. **Network slowdown:** artificial delay between the order desk and the cashier.
+**Continue reading:** [Day 2 Report: Breaking things on purpose](day-2-incidents.md)

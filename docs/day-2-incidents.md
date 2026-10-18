@@ -1,4 +1,21 @@
-# Incident Reports (Day 2)
+# Day 2 Report: Breaking Things on Purpose (Incident Postmortems)
+
+> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md)
+>
+> **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
+
+## The short version
+
+- I broke the store in **three planned ways** while 20 simulated customers ordered non-stop:
+  a bad code release, a slow network, and a crashed payment service.
+- The system also failed in **four ways I did not plan**: the store sold out, the monitoring tool
+  ran out of memory, the order desk ran out of network connections, and a bug left **119 customers
+  charged for orders that never completed**.
+- I found the real cause of each problem from evidence (timelines, charts, logs, database records),
+  fixed it, and **proved each fix with numbers**.
+- The biggest lesson: **a timeout means "we don't know," not "it failed."** Every timed-out
+  payment I checked had actually gone through.
+
 
 On Day 2, I deliberately broke my system in three different ways while it was handling heavy
 traffic, then investigated each failure the way an on-call engineer would. Along the way, the
@@ -11,7 +28,7 @@ was learned. Every number here comes from real measurements, not estimates.
 
 > **Quick refresher:** the system is a small online store with three services: an **order desk**
 > (`order-service`), a **warehouse** (`inventory-service`), and a **cashier** (`payment-service`).
-> See [NOTES.md](NOTES.md) for the full Day 1 explanation.
+> See the [Day 1 report](day-1-services-and-observability.md) for the full explanation.
 
 ---
 
@@ -281,7 +298,7 @@ records instead of guessing, got every one of them right.
 
 ---
 
-## What this means for the AI investigator (next stage)
+## What this means for the AI investigator
 
 Each incident becomes a **test case** with a known correct answer. The AI agent will get
 access to the same evidence I used (metrics, traces, logs, deployment history, and code
@@ -309,3 +326,12 @@ Measuring how often the AI gets these right is what will make this project credi
 | 5 | `c0e5958` | **Rollback** of #3 |
 | 6 | `de14693` | Route payment traffic through Toxiproxy |
 | 7 | `5d31f5e` | Fix: handle all errors; PAYMENT_UNKNOWN status |
+
+---
+
+## What happened next
+
+On Day 3, I built the tools an AI investigator uses to look at the system: the same charts,
+timelines, logs, and change history I used by hand in this report.
+
+**Continue reading:** [Day 3 Report: The AI's investigation tools](day-3-investigator-tools.md)
