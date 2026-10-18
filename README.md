@@ -1,112 +1,68 @@
-# Incident Lab: AI-Assisted Incident Investigation
+# Incident Lab
 
-**In plain English:** when a website or app breaks, engineers have to figure out *why*, often in
-the middle of the night while customers can't check out. They dig through logs, charts, request
-timelines, and recent code changes, which can take hours. **Incident Lab** is a platform where an AI
-assistant does that investigation: it gathers the same evidence a human would, identifies the
-root cause, and shows its reasoning.
+An AI-assisted incident investigation platform, built on a small microservices system that I break on purpose.
 
-What makes it different from typical "AI + logs" demos: the failures are **real**. The system is a
-running set of microservices that I break on purpose (bad deploys, network slowdowns, crashes),
-and the AI investigates **live telemetry**, not pre-written fake logs with the answer planted inside.
+When a production system goes down, most of the time spent fixing it goes into figuring out *why*: digging through logs, dashboards, request traces, and recent deploys. I wanted to see how far an LLM agent can get with that work if it has the same evidence an on-call engineer has. To make the test meaningful, the failures here are real. The services run under load, I inject faults (bad deploys, network latency, crashes), and the agent investigates live telemetry rather than canned logs with the answer already in them.
 
-## Project status
+## Status
 
-| Stage | What | Status | Report |
+| Day | Work | Status | Write-up |
 |---|---|---|---|
-| Day 1 | Microservices + full observability (traces, metrics, logs) | ✅ Done | [Day 1 report](docs/day-1-services-and-observability.md) |
-| Day 2 | Real failure injection, investigation, and fixes | ✅ Done | [Day 2 report](docs/day-2-incidents.md) |
-| Day 3 | Read-only investigation tools for the AI agent | ✅ Done | [Day 3 report](docs/day-3-investigator-tools.md) |
-| Day 4 | AI agent: investigates live incidents with Gemini tool calling | ✅ Done | [Day 4 report](docs/day-4-ai-agent.md) |
-| Day 5 | Dashboard with human-approved actions | 🔜 Next | |
-| Day 6 | Evaluation: measure how often the AI finds the right root cause | Planned | |
+| 1 | Three Spring Boot services with tracing, metrics, and structured logs | Done | [Day 1](docs/day-1-services-and-observability.md) |
+| 2 | Fault injection under load, investigation, fixes | Done | [Day 2](docs/day-2-incidents.md) |
+| 3 | Read-only investigation tools for the agent | Done | [Day 3](docs/day-3-investigator-tools.md) |
+| 4 | LLM agent investigating live incidents | Done | [Day 4](docs/day-4-ai-agent.md) |
+| 5 | Dashboard with human approval for actions | Next | |
+| 6 | Evaluation across incident types | Planned | |
 
-## Reports
-
-Every day of work has its own report in [`docs/`](docs/), written so that **anyone can follow it**:
-each section starts in plain English, then gives the technical detail. Read them in order:
-
-1. **[Day 1: Building the system and its "security cameras"](docs/day-1-services-and-observability.md)**:
-   a small online store split into three services, with monitoring that follows every request.
-2. **[Day 2: Breaking things on purpose](docs/day-2-incidents.md)**:
-   three planned failures, four unplanned ones, how each was investigated and fixed.
-3. **[Day 3: The AI investigator's tools](docs/day-3-investigator-tools.md)**:
-   the 8 tools that let an AI look at the system safely, and what testing them revealed.
-4. **[Day 4: The AI investigator goes live](docs/day-4-ai-agent.md)**:
-   the AI investigates real incidents: one partly wrong answer, how it was proven wrong, and the fix.
+Each write-up is meant to be readable without a deep backend background. I explain the idea first and then go into the technical detail.
 
 ## Architecture
 
 ```
-                         ┌──────────────────────────────────────────────┐
-client ──▶ order-service ─┼──▶ inventory-service ──▶ PostgreSQL          │
-           (8081)         └──▶ toxiproxy ──▶ payment-service ──▶ PostgreSQL
-                               (fault injection)   (8083)
-                                    inventory: 8082
+client ──▶ order-service ──▶ inventory-service ──▶ PostgreSQL
+           (8081)       └──▶ toxiproxy ──▶ payment-service ──▶ PostgreSQL
+                             (fault injection)   (8083)
 
-Observability:  OpenTelemetry agent ──▶ Jaeger (request traces)
-                Prometheus ◀── scrapes each service (latency, errors, DB pool)
-                Structured JSON logs, every line tagged with its trace ID
-Change history: deployments table (service, git commit, time) for every deploy
-Investigator:   Python tools that read all of the above (read-only)
-AI agent:       Gemini model that calls those tools step by step and writes a root-cause report
+Traces    OpenTelemetry Java agent ──▶ Jaeger
+Metrics   Prometheus scrapes each service (HTTP latency histograms, HikariCP pool)
+Logs      Structured JSON, each line tagged with its trace ID
+Deploys   Every deploy recorded with service, git SHA, and timestamp
+Agent     Python tools over all of the above (read-only), driven by Gemini
 ```
 
-## Tech stack
+## Stack
 
-| Area | Technologies |
-|---|---|
-| Services | Java 21, Spring Boot 3.5, Spring JDBC, HikariCP |
-| Data | PostgreSQL 16 |
-| Observability | OpenTelemetry, Jaeger, Prometheus, Grafana, structured logging |
-| Reliability testing | k6 (load), Toxiproxy (network faults) |
-| Investigator | Python 3.12, Prometheus/Jaeger HTTP APIs, Docker SDK, psycopg |
-| AI agent | Google Gemini API (gemini-3.8-flash, free tier), function calling, structured JSON output |
-| Infrastructure | Docker, Docker Compose |
+- **Services:** Java 21, Spring Boot 3.5, Spring JDBC, HikariCP, PostgreSQL 16
+- **Observability:** OpenTelemetry, Jaeger, Prometheus, Grafana
+- **Testing and faults:** k6 for load, Toxiproxy for network faults
+- **Agent:** Python 3.12, Gemini API with function calling, Prometheus and Jaeger HTTP APIs, Docker SDK, psycopg
+- **Infra:** Docker Compose
 
-## Quick start
+## Running it
 
 ```bash
-docker compose up --build -d          # start everything (first build: ~5-10 min)
-./scripts/load-test.sh 20 30s         # 20 virtual users ordering for 30 seconds
-./scripts/tool.sh list                # list the investigation tools
-./scripts/tool.sh call get_service_overview '{"minutes": 5}'
-./scripts/investigate.sh "Customers say checkout is slow" 5   # AI investigation (needs GEMINI_API_KEY in .env)
+docker compose up --build -d
+./scripts/load-test.sh 20 30s                 # 20 virtual users for 30 seconds
+./scripts/tool.sh list                        # investigation tools
+./scripts/investigate.sh "Checkout is slow" 5 # agent run (needs GEMINI_API_KEY in .env)
 ```
 
-| UI | URL |
-|---|---|
-| Jaeger (request timelines) | http://localhost:16686 |
-| Prometheus (metrics) | http://localhost:9090 |
-| Grafana (dashboards) | http://localhost:3000 |
+Jaeger runs on :16686, Prometheus on :9090, and Grafana on :3000.
 
-## Scripts
-
-| Script | Purpose |
+| Script | What it does |
 |---|---|
 | `scripts/load-test.sh [users] [duration]` | k6 load test |
-| `scripts/generate-traffic.sh [count]` | A few orders, including some deliberately rejected ones |
-| `scripts/deploy.sh <service>` | Rebuild and restart a service, and record the deployment |
-| `scripts/reconcile.sh` | Settle orders whose payment outcome is unknown |
-| `scripts/tool.sh` | Run the AI investigator's tools by hand |
-| `scripts/investigate.sh "<problem>" [minutes]` | Ask the AI agent to investigate; the report is saved in `investigations/` |
+| `scripts/generate-traffic.sh [count]` | A few orders, some deliberately rejected |
+| `scripts/deploy.sh <service>` | Rebuilds and restarts a service and records the deploy |
+| `scripts/reconcile.sh` | Settles orders whose payment outcome is unknown |
+| `scripts/tool.sh` | Runs the agent's tools by hand |
+| `scripts/investigate.sh "<problem>" [minutes]` | Runs the agent; reports are saved to `investigations/` |
 
-## Highlights so far (real measurements)
+## Results so far
 
-- **Healthy baseline:** ~1,200 orders/sec, p95 ~45 ms, 100% success (20 concurrent users, 3M+ records).
-- **Bad deploy:** a dropped database index cut throughput **41x** (1,197 to 29 orders/sec) with
-  **zero errors**; rolled back with `git revert` and fully recovered.
-- **4 real bugs found that I didn't plant**, including ephemeral port exhaustion
-  (~41,000 failed orders) and 119 customers charged while their orders stayed stuck.
-- **Key lesson:** a timeout means "unknown," not "failed." Every timed-out payment checked had
-  actually been charged; a reconciliation job now settles them against the payment records.
-- **Investigator tools:** 32,055 log lines compressed into 3 meaningful groups; overview output
-  33% smaller for the AI; malicious input (`8e9ac25; rm -rf /`) rejected by validation.
-- **AI agent:** correctly reported a healthy system (28,205 orders reported = 28,205 sent). On a live
-  network slowdown, its first answer blamed the wrong service; I disproved it with 3 independent
-  checks, improved the agent with general troubleshooting rules, and the re-run found the correct
-  root cause (payment service answered in 0.28 s while its caller waited 3+ s). Accuracy on unseen
-  incidents is measured next.
-
-Full details: [Day 2 report](docs/day-2-incidents.md), [Day 3 report](docs/day-3-investigator-tools.md),
-and [Day 4 report](docs/day-4-ai-agent.md).
+- Baseline under load: about 1,200 orders/sec, p95 around 45 ms, no errors, with 3M+ rows in the reservations table.
+- A deploy that dropped one index cut throughput from 1,197 to 29 orders/sec with zero errors. Health checks stayed green the whole time. Rolled back with `git revert`.
+- The fault tests turned up four bugs I hadn't planted, including ephemeral port exhaustion (around 41,000 failed orders) and a case where 119 customers were charged while their orders stayed stuck in PENDING.
+- Every payment that timed out turned out to have gone through. Timeouts are now recorded as `PAYMENT_UNKNOWN` and settled by a reconciliation job instead of being marked failed.
+- The agent correctly called a healthy system healthy. On a live latency incident, its first answer blamed the wrong service. After I verified that, tightened its reasoning rules, and switched models, it found the actual cause on the second run. I haven't measured accuracy on incidents it wasn't tuned on yet; that's Day 6.

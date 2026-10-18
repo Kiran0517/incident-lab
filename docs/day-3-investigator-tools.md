@@ -1,182 +1,90 @@
-# Day 3 Report: The AI Investigator's Tools
+# Day 3: Investigation tools for the agent
 
-> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md) · [Day 4: The AI investigator goes live](day-4-ai-agent.md)
->
-> **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
+[Overview](../README.md) · [Day 1](day-1-services-and-observability.md) · [Day 2](day-2-incidents.md) · [Day 3](day-3-investigator-tools.md) · [Day 4](day-4-ai-agent.md)
 
-## The short version
+## Summary
 
-- An AI can't open a dashboard or scroll through logs by itself. It needs **tools**: small
-  programs it can ask for specific evidence, like "show me the errors from the warehouse in the
-  last 10 minutes."
-- I built **8 tools** that give the AI the same views I used by hand on Day 2: performance charts,
-  request timelines, logs, deployment history, code changes, and what happened to customers.
-- Every tool is **read-only** (it can look, never change anything), **summarizes** huge amounts of
-  data into something an AI can read (32,055 log lines became 3 groups), and **rejects dangerous
-  input** (a hacking attempt hidden in a request was blocked).
-- I tested every tool against the live system, and the numbers matched exactly
-  (for example, 32,024 orders reported = 32,024 orders sent).
-- Testing also exposed problems that would have **misled the AI**, such as monitoring traffic
-  showing up as "customer requests." All were fixed before any AI was connected.
+An LLM can't open Grafana or scroll through logs. It needs tools: small functions it can call to fetch specific evidence, like "error logs from inventory in the last 10 minutes" or "what was deployed today." I built eight of them in Python, covering the same views I used by hand on Day 2. They're read-only, they summarize large amounts of data into something a model can actually read, and they validate their inputs.
 
+There's no AI in this step. The point was to make sure each tool returns correct, compact evidence before anything depends on it. I tested every one against the live system, and the numbers matched exactly. Testing also caught a few problems that would have sent the agent in the wrong direction.
 
-Before an AI can investigate an outage, it needs a way to **look at the system**. On Day 3, I built
-8 tools that give it the same views I used by hand on Day 2: performance charts, request timelines,
-logs, deployment history, code changes, and customer impact.
+## What a tool is
 
-No AI runs yet. The goal of Day 3 was to make sure every tool returns **correct, compact, safe**
-evidence, and to test each one by hand against the live system. On Day 4, the AI will call these
-same tools on its own.
+Modern LLMs support *function calling*. You describe each tool (its name, what it does, and its inputs), and the model decides which one to call next based on what it has learned so far. The program runs the tool and hands the result back. A rough analogy is a detective who can't leave the office but can send an assistant to collect specific evidence.
 
----
-
-## In plain English: what is a "tool"?
-
-Think of the AI as a detective who can't leave the office. It can't open Grafana or scroll through
-logs itself, but it can **ask an assistant** to fetch specific evidence: "show me the error logs from
-the warehouse for the last 10 minutes," or "what was deployed today?" Each tool is one kind of
-question the assistant knows how to answer.
-
-Modern AI models (Claude, GPT, Gemini) support this directly through **tool calling**: you describe
-each tool (its name, what it does, and what inputs it takes), and the model decides which tool to
-use next based on what it has learned so far.
-
----
-
-## The 8 tools
+## The tools
 
 | Tool | Question it answers | What I used manually on Day 2 |
 |---|---|---|
-| `get_service_overview` | Is each service up, busy, failing, slow? Is its database pool full? | Prometheus graphs |
-| `query_metrics` | Any custom metric question | Typing PromQL queries |
+| `get_service_overview` | Is each service up, busy, failing, slow? Is the DB pool saturated? | Prometheus graphs |
+| `query_metrics` | Any other metric question (PromQL) | Prometheus |
 | `find_traces` | Which recent requests were slowest or failed? | Jaeger search |
-| `get_trace` | Step by step, where did one request spend its time? | Jaeger timeline view |
-| `search_logs` | What errors or warnings happened, and how many of each? | `docker compose logs \| grep` |
-| `get_recent_deployments` | What changed recently, and exactly when? | The deployments table |
-| `get_commit_diff` | What did a specific code change actually change? | `git show` |
-| `get_order_outcomes` | What happened to customers' orders? | SQL status queries |
+| `get_trace` | Where did one request spend its time? | Jaeger trace view |
+| `search_logs` | Which errors happened, and how often? | `docker compose logs \| grep` |
+| `get_recent_deployments` | What changed, and exactly when? | Deployments table |
+| `get_commit_diff` | What did a given commit change? | `git show` |
+| `get_order_outcomes` | What happened to customers' orders? | SQL queries |
 
----
+The code is in [`investigator/`](../investigator/). It runs in its own container with read-only access to the repo.
 
-## Design decisions (and why)
+## Design decisions
 
-### 1. Read-only
+**Read-only.** The tools can look but can't change anything. An agent that investigates shouldn't be able to restart services or touch data on its own. Any action, like a rollback, will need human approval.
 
-The tools can **look but never change anything**. An AI that investigates should not be able to
-restart services or edit data on its own. Any action (like a rollback) will require human approval
-in a later stage.
+**Compact output.** Models have a limited context window, and every token costs time and money. Raw evidence is far too big, so each tool summarizes:
 
-### 2. Compressed output
+- Logs are grouped. IDs and numbers are replaced with placeholders (`orderRef=<uuid> sku=SKU-<n>`), so lines that differ only in their values collapse into one group with a count. In one test, 32,055 log lines became 3 groups.
+- Metrics are reduced to min, max, average, last value, and peak time, plus a few samples. A flat series (like a pool size that's always 10) gets no samples at all.
+- Samples are written as compact strings like `"18:28:48 411.67"`. Together with the flat-series change, this took the overview from 9,878 to 6,640 characters, about 33% smaller, with the same information.
 
-AI models have a limited "working memory" (the **context window**), and every word they read costs
-money and time (measured in **tokens**). Raw evidence is huge, so each tool summarizes it:
+**Errors come back as data.** If a tool fails (a timeout, bad input), it returns something like `{"error": "ReadTimeout: ..."}` instead of crashing, so the agent can read it and try something else.
 
-- **Logs are grouped.** 32,055 log lines like `Stock reserved orderRef=8f3a... sku=SKU-1001` become
-  **one group** with a count, by replacing IDs and numbers with placeholders
-  (`orderRef=<uuid> sku=SKU-<n>`). Result: 32,055 lines → **3 groups**.
-- **Metrics are summarized** as min / max / average / last / peak time, plus a few samples.
-  A flat line (like "database pool size: always 10") shows no samples at all.
-- **Compact samples:** `"18:28:48 411.67"` instead of a 4-line JSON array.
-  Measured result: the overview went from **9,878 to 6,640 characters (33% smaller)**
-  with the same information.
-
-### 3. Errors returned as data
-
-If a tool fails (a timeout, bad input), it returns a readable message like
-`{"error": "ReadTimeout: ..."}` instead of crashing. The AI can read it and try something else,
-just as a human would after a failed query.
-
-### 4. Input validation (security)
-
-An AI agent with tools is a **security surface**. Text inside a log line could try to trick the
-AI into doing something harmful (this is called **prompt injection**). So safety is enforced in
-the tools themselves, not by trusting the AI:
+**Input validation.** An agent with tools is a security surface. Text inside a log line could try to steer the model into doing something harmful (prompt injection), so the tools don't trust their inputs:
 
 ```
 get_commit_diff("8e9ac25; rm -rf /")
-→ {"error": "ValueError: sha must be 7-40 hex characters"}   (nothing executed)
+→ {"error": "ValueError: sha must be 7-40 hex characters"}
 ```
 
-Commands are run with argument lists (never through a shell), and every ID is checked against a
-strict pattern.
+Commands run with argument lists rather than through a shell, and IDs are checked against strict patterns.
 
-### 5. Built for the AI's context
+**Context for the model.** Results include short notes on how to read them, for example that `toxiproxy` is the proxy in front of payment-service, or that an HTTP 409 on `POST /orders` is a rejected order rather than a system fault. Tool definitions use JSON Schema, which is the format function-calling APIs expect.
 
-Tool results include short **notes** that explain how to read them, for example:
-"`toxiproxy` is the network proxy in front of payment-service" and
-"HTTP 409 on POST /orders is a rejected order (a business outcome), not a system failure."
-The tool definitions use **JSON Schema**, the exact format AI tool-calling APIs expect.
+## Problems found while testing
 
----
-
-## Problems found while testing (and fixed)
-
-Testing each tool by hand against the real system exposed problems that would have misled the AI:
-
-| Problem | What would have gone wrong | Fix |
+| Problem | Effect on the agent | Fix |
 |---|---|---|
-| Trace search returned Prometheus's own scrapes (`GET /actuator/prometheus`) | The AI would investigate monitoring noise instead of customer orders | Filter traces by business endpoint |
-| Fetching more traces to filter them caused a 15-second timeout in Jaeger | The tool would fail during the incidents it's meant for | Ask Jaeger for the right endpoint directly (server-side filtering): ~1 second |
-| Background database spans (`order-service shop`) appeared as "requests" | More noise in the slowest-request list | Same server-side filter |
-| Repeated identical samples in flat metrics | Wasted tokens | Skip samples for flat lines |
+| Trace search returned Prometheus's own scrapes (`GET /actuator/prometheus`) | It would investigate monitoring noise instead of orders | Search by business endpoint |
+| Fetching more traces and filtering them in Python made Jaeger time out after 15 s | The tool would fail during the incidents it exists for | Let Jaeger filter by operation server-side (~1 s) |
+| Background DB spans (`order-service shop`) showed up as requests | More noise in the slowest-request list | Same server-side filter |
+| Flat metrics repeated identical samples | Wasted tokens | Skip samples for flat series |
 
-### Traps the AI will need to handle
+There are also a few things in the data the agent will have to handle correctly:
 
-These are real signals in the data that a careless investigator would misread:
+- The request rate looked like 570/s when the real rate was 1,067/s. Rates are computed over one-minute windows, and that burst lasted only 30 seconds.
+- A `Thread starvation or clock leap detected (delta=1d23h40m...)` warning came from my laptop going to sleep. It's harmless.
+- Rejected orders (HTTP 409) show `has_error: true` at the HTTP level, but they're normal business behavior.
 
-- **Request rate looked like 570/sec when the real rate was 1,067/sec.** The metric averages over
-  1 minute, and the traffic lasted only 30 seconds. Short bursts look smaller than they are.
-- **`Thread starvation or clock leap detected (delta=1d23h40m...)`** is a warning caused by my laptop
-  going to sleep. It's harmless, and the AI must not blame it.
-- **`has_error: true` on a rejected order (HTTP 409)** is technically an error status, but it is
-  normal business behavior, not a system fault.
-
----
-
-## Verified against the live system
+## Verification
 
 | Tool | Check | Result |
 |---|---|---|
-| `get_service_overview` | p95 vs. k6 load test | 45–67 ms vs. 46.9 ms ✓ |
-| `get_order_outcomes` | Confirmed orders vs. k6 | 32,024 = 32,024 ✓ exact |
-| `search_logs` | Rejection warnings vs. rejected orders sent | 10 = 10 ✓ |
-| `find_traces` | Only real customer orders, with HTTP status | ✓ |
-| `get_trace` | Full request path including SQL statements | ✓ |
-| `get_recent_deployments` | All 7 Day 2 deploys with exact times | ✓ |
-| `get_commit_diff` | Shows the dropped index from Incident #1 | ✓ |
-| `get_commit_diff` | Malicious input rejected | ✓ |
-
----
+| `get_service_overview` | p95 vs. the k6 run | 45–67 ms vs. 46.9 ms |
+| `get_order_outcomes` | Confirmed orders vs. k6 | 32,024 and 32,024 |
+| `search_logs` | Rejection warnings vs. rejected orders sent | 10 and 10 |
+| `find_traces` | Only real orders, with HTTP status | Yes |
+| `get_trace` | Full request path including SQL | Yes |
+| `get_recent_deployments` | All 7 Day 2 deploys with exact times | Yes |
+| `get_commit_diff` | Shows the dropped index from Incident 1 | Yes |
+| `get_commit_diff` | Rejects malicious input | Yes |
 
 ## Known limitations
 
-- **Trace search** looks at the 50 most recent matching requests. To find slow requests during an
-  incident, the AI should pass `min_duration_ms` so Jaeger returns only slow ones.
-- **Logs are read through the Docker API**, which is fine for a local lab. In production you'd use a
-  log platform such as Loki or Elasticsearch instead of access to the Docker socket.
-- **Metrics use 1-minute windows**, so very short spikes are smoothed out.
+- Trace search looks at the 50 most recent matching requests. During an incident, the agent should pass `min_duration_ms` so Jaeger returns only slow requests.
+- Logs are read through the Docker API. That's fine locally, but in production I'd use a log store like Loki or Elasticsearch rather than giving anything access to the Docker socket.
+- One-minute rate windows smooth out very short spikes.
 
----
-
-## Glossary (plain English)
-
-| Term | Meaning |
-|---|---|
-| **Tool calling** | A feature of modern AI models: you describe tools, and the AI decides which one to use and with what inputs. |
-| **Token** | The unit AI models read and are billed by; roughly 4 characters of text. Fewer tokens = cheaper and faster. |
-| **Context window** | How much text an AI can "keep in mind" at once. Raw logs would overflow it, so the tools summarize. |
-| **Trace / span** | A trace is the full journey of one request through the system; each step in it is a span. |
-| **PromQL** | The query language for Prometheus, the tool that stores performance numbers over time. |
-| **p95** | 95% of requests were at least this fast. Engineers use it because averages hide slow experiences. |
-| **JSON** | A simple, structured text format that both programs and AI models read easily. |
-| **JSON Schema** | A standard way to describe what inputs a tool accepts; AI tool-calling APIs use it. |
-| **Prompt injection** | Hidden instructions in text (like a log line) that try to trick an AI into doing something harmful. |
-| **Read-only** | Can look at data but never change it. |
-| **Docker socket** | The control channel for Docker; the log tool uses it to read container logs. |
-
----
-
-## How to use the tools
+## Usage
 
 ```bash
 ./scripts/tool.sh list
@@ -189,12 +97,15 @@ These are real signals in the data that a careless investigator would misread:
 ./scripts/tool.sh call get_order_outcomes '{"minutes": 15}'
 ```
 
-Code: [`investigator/`](../investigator/) (Python 3.12, runs in Docker with read-only access to the repo).
+## Terms
 
-## What happened next
+- **Function calling:** the model asks the program to run a named tool with specific inputs, then reads the result.
+- **Token:** the unit models read and are billed by, roughly four characters of text.
+- **Context window:** how much text a model can take into account at once.
+- **Trace / span:** a trace is one request's full journey; each step in it is a span.
+- **PromQL:** Prometheus's query language.
+- **Prompt injection:** instructions hidden in data (a log line, for example) that try to manipulate a model.
 
-On Day 4, I connected an AI model to these tools. It investigated a healthy system correctly,
-got a live incident partly wrong on the first try, and found the correct root cause after
-improvements.
+## Next
 
-**Continue reading:** [Day 4 Report: The AI investigator goes live](day-4-ai-agent.md)
+On Day 4 I connected an LLM to these tools and let it investigate a live incident. Continue with [Day 4](day-4-ai-agent.md).

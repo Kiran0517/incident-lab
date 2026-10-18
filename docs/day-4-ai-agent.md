@@ -1,309 +1,176 @@
-# Day 4 Report: The AI Investigator Goes Live
+# Day 4: The agent goes live
 
-> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md) · [Day 4: The AI investigator goes live](day-4-ai-agent.md)
->
-> **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
+[Overview](../README.md) · [Day 1](day-1-services-and-observability.md) · [Day 2](day-2-incidents.md) · [Day 3](day-3-investigator-tools.md) · [Day 4](day-4-ai-agent.md)
 
-## The short version
+## Summary
 
-- I connected an AI model (Google Gemini) to the 8 investigation tools from Day 3. Now you can type
-  a complaint like *"checkout is slow and some orders fail"*, and the AI investigates on its own:
-  it decides what to check, reads the evidence, and writes a root-cause report.
-- **Test 1, healthy system:** the AI correctly said "no incident found" and backed it with exact
-  numbers (28,205 orders reported = 28,205 orders sent). Many AI demos fail here by inventing problems.
-- **Test 2, a live network slowdown:** the first attempt was **partly wrong**. It blamed the payment
-  service for an "outage" when the service was healthy and only the network to it was slow. I
-  verified this myself and proved the AI wrong with three independent pieces of evidence.
-- I improved the agent with **general troubleshooting rules** (not hints about this incident),
-  hit Google's free-tier limit of **20 requests per day**, and redesigned the agent to need fewer requests.
-- **Test 3, the same slowdown again:** the AI found the **correct root cause**, explained the decisive
-  evidence (the payment service answered in 0.28 seconds while its caller waited over 3 seconds),
-  and ruled out four other explanations.
-- Honest caveat: the AI improved after changes I made while looking at this exact incident, so the
-  real test is still ahead (Day 6), on incidents it was not tuned for.
+I connected Gemini to the eight tools from Day 3. You give it a complaint like *"checkout is slow and some orders fail,"* and it decides what to look at, reads the evidence, and writes a root-cause report.
 
----
+It handled a healthy system correctly. On its first live incident (network latency between order-service and payment-service), it got the area right but the mechanism wrong: it blamed a payment-service outage when the service was fine and only the network to it was slow. I proved that with three independent checks, gave it some general troubleshooting rules, ran into the free tier's limit of 20 requests per day, redesigned the agent to use fewer requests, and re-ran it. The second time it found the actual cause and showed the evidence for it.
 
-## In plain English: what is an "AI agent"?
+The caveat is that I tuned it while looking at this same incident, so it hasn't been tested fairly yet. That's what Day 6 is for.
 
-A normal chatbot answers from what it already knows. An **agent** can also **take actions** to
-gather new information, then decide what to do next based on what it found.
+## How it works
 
-Think of a detective who can't leave the office but has an assistant. The detective says
-"get me the error logs from the warehouse," reads them, then says "now show me what was deployed
-today," and so on, until there's enough evidence to name the cause. The AI is the detective; the
-8 read-only tools from Day 3 are the assistant.
+An agent differs from a regular chatbot in that it can take actions to collect information and then decide what to do next based on what comes back.
 
 ```
-You: "Customers say checkout is slow and some orders fail"
-  │
-  ▼
-Code gathers the basics automatically (no AI needed): service health, recent deploys,
-order outcomes, error logs
-  │
-  ▼
-AI reads them ──▶ "Payment calls are failing. Let me look at timings."  ──▶ asks for 2-4 tools
-  ▲                                                                            │
-  └────────────────────── results go back to the AI ◀──────────────────────────┘
-  │   (repeats a few times, maximum 8 rounds)
-  ▼
-AI writes the report: summary, root cause, confidence, evidence, timeline,
-customer impact, what it ruled out, recommended actions (which a human must approve)
+Problem description
+   │
+   ▼
+Triage: plain code collects service health, recent deploys, order outcomes,
+        and ERROR logs for every service (no model calls)
+   │
+   ▼
+Model reads the evidence ──▶ asks for 1-4 tool calls ──▶ tools run
+   ▲                                                       │
+   └──────────────────── results go back ◀─────────────────┘
+   │   (up to 8 rounds)
+   ▼
+Report: summary, root cause, confidence, evidence, timeline,
+        customer impact, what was ruled out, recommended actions
 ```
 
----
+The pieces:
 
-## How it's built
+- **System prompt.** Describes the system, a troubleshooting method, and rules, for example "every claim must cite a number or timestamp from a tool."
+- **Function calling.** The model gets the tool schemas and replies either with tool calls or with its final answer.
+- **Structured output.** The final report has to be JSON in a fixed shape, so it can be displayed, stored, and eventually scored automatically.
+- **Records.** Every run is saved to [`investigations/`](../investigations/) with each tool call, its duration, the number of model calls, and token usage.
+- **Safety.** The tools are read-only. The agent can recommend actions, but a human has to carry them out.
 
-| Piece | What it does |
+The method in the prompt is roughly what I'd do myself: read the triage, figure out when the problem started, check what changed (and only treat a deploy as a suspect if it happened before the problem started), gather supporting evidence, check customer impact, and test at least one alternative explanation before concluding.
+
+I deliberately kept anything about my specific incidents out of the prompt. If the prompt contained the answers, measuring accuracy later would be pointless.
+
+Code: [`agent.py`](../investigator/investigator/agent.py) and [`gemini.py`](../investigator/investigator/gemini.py).
+
+## Model and setup
+
+I used Gemini through its free tier to keep the project at zero cost, calling the REST API directly instead of using the SDK so every request and response is easy to inspect. A local model was an option, but small local models tend to lose track over multi-step tool use, and accuracy matters most here.
+
+The API key lives in `.env`, which is in `.gitignore` (I confirmed with `git check-ignore`). I wrote it into the file straight from the clipboard with `pbpaste`, so it was never typed or displayed. `docker-compose.yml` only references `${GEMINI_API_KEY}`.
+
+A few things I didn't expect:
+
+- `gemini-2.5-flash` is no longer available to new accounts; the 404 response pointed to a newer model.
+- Requests to `gemini-3.5-flash` were counted against `gemini-3.6-flash`'s quota, so the name is redirected.
+- The free tier allows 20 requests per day per model.
+- On the free tier, Google may use inputs to improve its models. That's fine for synthetic lab data, but it's a reason not to send real customer data through it.
+
+## Test 1: healthy system
+
+After 30 seconds of normal traffic, I asked: *"Is the order system healthy right now?"*
+
+It answered "no incident found" with high confidence, and the evidence checked out:
+
+| Agent's claim | Actual |
 |---|---|
-| **System prompt** | The AI's job description: how the system is built, a step-by-step troubleshooting method, and rules like "every claim must quote a number or timestamp from a tool." |
-| **Tool calling** | The AI is given the 8 tools' descriptions in a standard format (JSON Schema). It answers either "call these tools with these inputs" or with its final report. |
-| **Automatic triage** | Evidence every investigation needs is collected by plain code before the AI starts, so it costs no AI requests. |
-| **Structured report** | The AI must answer in a fixed JSON format, so the report can be displayed, stored, and later **scored automatically**. |
-| **Saved records** | Every investigation is saved as a file in [`investigations/`](../investigations/): every tool call, how long it took, how many AI requests, and how many tokens were used. |
-| **Safety** | The tools are read-only. The AI can recommend actions but can't perform them; every action requires human approval. |
+| 28,205 orders confirmed | k6 sent 28,205 |
+| No errors; no failed, stuck, or unknown orders | k6 saw 0 failures |
+| No deploys in the last hour | The last deploy was two weeks earlier |
 
-Code: [`investigator/investigator/agent.py`](../investigator/investigator/agent.py) (the loop) and
-[`gemini.py`](../investigator/investigator/gemini.py) (the connection to Google's API).
+This case matters more than it looks. An agent that finds problems in a healthy system wastes people's time and loses their trust fast.
 
-### The troubleshooting method the AI follows
+## Test 2: live latency incident (partly wrong)
 
-1. Read the triage: what's abnormal, and when did it start?
-2. Build a timeline.
-3. Check what changed. **A deploy can only be the cause if it happened before the problem started**
-   (the lesson from Day 2).
-4. Gather supporting evidence: logs, request timelines, metrics.
-5. Check what happened to customers.
-6. Consider at least one alternative explanation and test it against the evidence.
+With 20 virtual users running, I added 2.5 s (± 1 s) of latency between order-service and payment-service through Toxiproxy. order-service times out after 3 s. The agent only got the complaint: *"Customers are complaining that checkout is slow and some orders fail."*
 
----
-
-## Choosing and connecting the AI model
-
-**Model:** Google Gemini, used through its **free tier** to keep the project at $0.
-
-| Decision | Why |
-|---|---|
-| Gemini instead of a model running on my laptop | Accuracy at multi-step reasoning matters most; small local models often lose track across many steps. (A local option can be added later.) |
-| A "Flash" model | Fast, and good at tool calling. |
-| Plain HTTP instead of Google's software kit | Every request and response is easy to inspect and debug. |
-| No hints about my incidents in the instructions | Otherwise, measuring accuracy later would be meaningless. |
-
-**Keeping the API key secret:** the key lives in a `.env` file that Git is told to ignore
-(checked with `git check-ignore`). It was moved from the clipboard into the file with `pbpaste`,
-so it was never typed, displayed, or pasted anywhere. `docker-compose.yml` only contains a placeholder.
-
-**Real-world surprises while connecting:**
-- `gemini-2.5-flash` is **no longer available to new accounts**; Google's error message pointed to a newer model.
-- The name `gemini-3.5-flash` was quietly served by `gemini-3.6-flash`.
-- The free tier allows **20 requests per day per model** (more on this below).
-- On the free tier, Google may use inputs to improve its models, which is fine for fake lab data
-  but a reason never to send real customer data through a free tier.
-
----
-
-## Test 1: Is the AI honest when nothing is wrong?
-
-**Setup:** 30 seconds of normal traffic, then the question *"Is the order system healthy right now?"*
-
-**Result:** ✅ **"No incident found," high confidence.**
-
-| AI's claim | Reality |
-|---|---|
-| 28,205 orders confirmed | Load test sent exactly 28,205 ✓ |
-| 0 errors; 0 failed, stuck, or unknown orders | 0 failures ✓ |
-| No deploys in the last hour | Last deploy was two weeks earlier ✓ |
-| No invented problems | Ignored old deploys and harmless warnings ✓ |
-
-**Why this matters:** an AI that "finds" problems in a healthy system wastes engineers' time and
-quickly loses their trust. Saying "all clear" when it's true is a core requirement.
-
----
-
-## Test 2: A live incident, and the AI was partly wrong
-
-**Setup:** 20 simulated customers ordering non-stop. Then I added 2.5 seconds (± 1 second) of
-**network delay** between the order service and the payment service. The order service gives up
-after 3 seconds. The AI was only told *"Customers are complaining that checkout is slow and some
-orders fail."* It didn't know what I had done.
-
-### What it got right and wrong
-
-| | AI said | Reality | |
+| | Agent said | Actual | |
 |---|---|---|---|
-| Was it a deploy? | No | Correct | ✅ |
-| Which part of the system? | The payment path | Correct | ✅ |
-| Error count | 207 "Payment outcome unknown" errors | Exactly 207 ✓ | ✅ |
-| Recommended reconciliation + circuit breaker | Yes | Both appropriate | ✅ |
-| **Root cause** | "**payment-service outage**" | **Network delay**; the payment service was healthy | ❌ |
-| "20 orders stuck" | Stuck | The 20 orders currently being processed (one per simulated customer) | ❌ |
+| Deploy involved? | No | Correct | right |
+| Which area? | Payment path | Correct | right |
+| Errors | 207 "Payment outcome unknown" | Exactly 207 | right |
+| Root cause | payment-service outage | Network latency; payment-service was healthy | wrong |
+| "20 stuck orders" | Stuck | The 20 orders in flight, one per virtual user | wrong |
 
-### How I proved the AI wrong
+Its main evidence was the Prometheus `up` metric for payment-service dropping to 0, which it read as "the service went down." I checked three things:
 
-Its main evidence was a monitoring signal called `up` dropping to 0, which it read as "the service
-went down." I checked three things myself:
+1. **Docker:** payment-service had been running for five days with zero restarts.
+2. **The metric itself:** `up` averaged 0.972 over 30 minutes. Prometheus failed to scrape it for under a minute, which means a scrape failed, not that the service died. I still don't know why those scrapes failed. My guess is the laptop being overloaded, but I haven't confirmed it.
+3. **Payments:** reconciliation found that all 207 uncertain orders had been charged. A crashed service can't record charges.
 
-1. **Docker:** the payment service had been running for 5 days with **0 restarts**. It never went down.
-2. **The `up` signal:** 97.2% normal over 30 minutes. The monitoring system failed to collect data
-   for **less than a minute**. That means "couldn't take a reading," not "service dead."
-   (Why those readings failed is still unexplained; my guess is the laptop being overloaded.)
-3. **The money:** the reconciliation job found that **all 207** uncertain orders had actually been
-   charged. A crashed payment service can't record charges.
+The flaw in its reasoning was building the conclusion on one signal and never making the obvious comparison: how long the caller waited versus how long payment-service took to respond. If the caller waits seconds and the service answers in milliseconds, the time is going somewhere in between. Someone acting on that first report would have spent time digging into a healthy service.
 
-**The mistake in its reasoning:** it built a conclusion on one signal and never made the decisive
-comparison: *how long did the caller wait vs. how long did the payment service take?* If the caller
-waits seconds but the service answers in milliseconds, the time is lost **between** them.
+## Changes after Test 2
 
-An on-call engineer following the first report would have investigated a healthy service and lost
-valuable time. **This is why AI conclusions need verification, and why this project measures accuracy.**
+I added general troubleshooting rules rather than hints about this incident:
 
----
-
-## Improving the agent with general rules
-
-Each fix is a general troubleshooting principle, not a hint about this specific incident:
-
-| Problem in its reasoning | Fix |
+| Problem | Change |
 |---|---|
-| Treated "couldn't collect a reading" as "service is down" | Tool notes now explain what `up = 0` really means. New rule: before calling a service dead, check whether it is still doing work. |
-| Never compared the caller's wait time with the callee's response time | New rule plus a tool note: a big gap between them means time is lost in the network in between. |
-| Called normal in-progress orders "stuck" | The order tool now reports `stuck_pending_orders` (pending for over 30 seconds) separately. |
-| Couldn't see **when** a metric was at its lowest | Metric summaries now include `lowest_at`. |
+| Treated a failed scrape as an outage | Tool notes explain what `up = 0` means, and a new rule says to check whether a service is still doing work before calling it down |
+| Never compared caller vs. callee latency | New rule and tool note: a large gap means time is being lost between them |
+| Counted in-flight orders as stuck | `get_order_outcomes` now reports `stuck_pending_orders` (pending for more than 30 s) separately |
+| Couldn't tell when a metric bottomed out | Metric summaries now include `lowest_at` |
 
----
+## Hitting the quota
 
-## Hitting the free-tier limit, and redesigning around it
+The next run didn't start. Every request came back 429, and the agent gave up after about three and a half minutes of retries. Rather than guess, I sent a single request with curl and read Google's error:
 
-The next run never started. Google refused every request. Reading Google's actual error message
-(instead of guessing) showed:
+> Quota exceeded ... `GenerateRequestsPerDayPerProjectPerModel-FreeTier` ... limit: 20 ... retry in 4h35m
 
-> Quota exceeded ... `GenerateRequestsPerDayPerProjectPerModel-FreeTier` ... limit: **20** ... retry in **4h35m**
+The first two runs had used 11 to 12 model calls each, plus retries, so 20 was gone quickly. I changed the design:
 
-The first two investigations used about 11–12 AI requests each, plus retries. 20 per day runs out fast.
+- **Triage in code.** The six tool calls every investigation starts with now run before the model is involved, at no cost against the quota.
+- **Parallel tool calls.** The prompt asks the model to request independent tools in the same turn.
+- **Round limit.** It aims for about 4 rounds, with a hard stop at 8.
+- **Fail fast.** If the daily quota is exhausted, it stops right away with a clear message.
+- **Honor `retryDelay`.** For per-minute limits, it waits as long as Google says to.
+- **Pacing.** At least 6 seconds between requests.
 
-**The redesign:**
+I also switched to `gemini-3.8-flash`, the model Google's error message recommended. Quotas are per model, so that came with its own 20 requests.
 
-| Change | Effect |
-|---|---|
-| **Automatic triage** | The 6 tool calls every investigation needs are made by plain code before the AI starts: zero AI requests. |
-| **Parallel tool calls** | The AI is told to ask for several independent tools in one round, instead of one per round. |
-| **Round limit** | Aim for about 4 rounds, hard stop at 8. |
-| **Fail fast** | If the *daily* limit is hit, stop immediately with a clear message (instead of retrying for minutes). |
-| **Honor Google's retry time** | For per-minute limits, wait exactly as long as Google says. |
-| **Request pacing** | At least 6 seconds between requests to stay under per-minute limits. |
+## Test 3: same incident, correct diagnosis
 
-Switching to `gemini-3.8-flash` (the model Google recommended) also gave a fresh daily quota,
-since limits are counted per model.
+> *"Network latency / jitter introduced by toxiproxy between order-service and payment-service exceeds the order-service HTTP client timeout of 3.0 seconds."*
 
----
+This time the reasoning held up. It compared both sides of the call: payment-service's maximum server-side time was 0.28 s, while order-service's client waited 3.01–3.16 s. It ruled out a payment-service failure (no 5xx, all 201s), database pool exhaustion, inventory, and deploys, each with numbers. Its recommendation was to remove the latency on the proxy, reconcile the affected orders, and review the timeout policy. It also noticed two separate waves of errors, which was correct: one from the earlier run that hit the quota, and one from this run.
 
-## Test 3: The same incident again, and this time it was right
+The counts matched again: k6 recorded 198 failed orders, reconciliation found 198 `PAYMENT_UNKNOWN`, and all 198 customers had been charged.
 
-**Result:** ✅ **Correct root cause, high confidence.**
+What still needs work:
 
-> *"Network latency / jitter introduced by toxiproxy between order-service and payment-service
-> exceeds the order-service HTTP client timeout of 3.0 seconds."*
+- It spent four rounds looking for proxy and "latency" metrics that don't exist, then hit the round limit. Telling it which metrics are available should fix that.
+- Token use went up, from 69K to 118K. It made fewer model calls, but every call resends the whole conversation, including the triage block. Fewer calls doesn't automatically mean cheaper.
+- One piece of its evidence was weak: an *average* latency of 16.92 ms, pulled down by thousands of fast requests. The maximum it found later was the real signal.
 
-| | Test 2 | **Test 3** |
-|---|---|---|
-| Root cause | ❌ Payment service outage | ✅ **Network delay between the services** |
-| Decisive evidence | One failed monitoring reading | ✅ **Payment service answered in ≤ 0.28 s; the order service waited 3.01–3.16 s** |
-| Ruled out | Deploys | ✅ Deploys, payment service failure, database pool, inventory |
-| "Stuck" orders mistake | ❌ | ✅ Not repeated |
-| Recommended fix | Check the payment service (wrong place) | ✅ Remove the network delay, reconcile orders, review timeouts |
+## All runs
 
-It also noticed something I didn't point out: **two separate waves of errors**, one from the run
-where the AI was blocked by the quota, and the current one. That's correct.
-
-**Cross-check:** the load test had **198 failed orders**; reconciliation found **198** uncertain
-payments, and all 198 customers had actually been charged.
-
-### What still needs work
-
-- **It went in circles for 4 rounds** looking for proxy and "latency" metrics that don't exist,
-  then hit the round limit. Fix for later: tell the AI which metrics exist.
-- **Tokens went up, not down** (118K vs 69K). Fewer AI requests, but each request resends the whole
-  conversation, including the large triage block. Fewer calls doesn't automatically mean cheaper.
-- **One weak piece of evidence:** an *average* latency of 16.92 ms, diluted by thousands of fast
-  requests. The *maximum* it found later (3.01–3.16 s) was the real evidence.
-
----
-
-## All runs at a glance
-
-| Run | Model | Scenario | Result | AI requests | Tool calls | Time | Tokens |
+| Run | Model | Scenario | Result | Model calls | Tool calls | Time | Tokens |
 |---|---|---|---|---|---|---|---|
-| 1 | Gemini 3.5 Flash | Healthy system | ✅ Correct | ~11 | 11 | 109 s | 55,702 |
-| 2 | Gemini 3.5 Flash | Network delay | ⚠️ Partly correct | ~12 | 12 | 269 s* | 68,920 |
-| — | Gemini 3.5 Flash | Network delay | ⛔ Blocked by daily quota | 0 | 0 | — | — |
-| 3 | Gemini 3.8 Flash | Network delay | ✅ Correct | 9 | 24 (6 triage) | 70 s | 118,453 |
+| 1 | Gemini 3.5 Flash | Healthy | Correct | ~11 | 11 | 109 s | 55,702 |
+| 2 | Gemini 3.5 Flash | Latency | Partly correct | ~12 | 12 | 269 s* | 68,920 |
+| – | Gemini 3.5 Flash | Latency | Blocked by quota | 0 | 0 | – | – |
+| 3 | Gemini 3.8 Flash | Latency | Correct | 9 | 24 (6 triage) | 70 s | 118,453 |
 
-\* Mostly waiting on Google's rate limits.
+\* Most of this was waiting on rate limits.
 
----
+## Caveats
 
-## Honest caveats
-
-1. **Two things changed between Test 2 and Test 3:** the reasoning rules *and* the model. I can't
-   say which one fixed the diagnosis; probably both contributed.
-2. **The rules were written after studying this exact incident.** A re-test on the same incident
-   favors the agent. The fair test is Day 6, with incidents it wasn't tuned on (the bad deploy and the crash).
-3. **One run each.** AI models can answer differently each time, so single runs prove possibility,
-   not reliability. Day 6 will run each scenario several times.
-
----
+1. Two things changed between Test 2 and Test 3: the reasoning rules and the model. I can't separate their effects.
+2. The rules were written after studying this incident, so re-testing on it favors the agent. The fair test is on incidents it wasn't tuned for, like the bad deploy and the crash.
+3. Each scenario ran once. LLM output varies between runs, so these results show the agent *can* get it right, not how often it does. Day 6 will run each scenario several times.
 
 ## What I learned
 
-1. **Verify AI conclusions.** The first wrong answer sounded confident and well-written.
-2. **Test the "nothing is wrong" case.** An investigator that invents problems is worse than none.
-3. **Know what each signal really means.** "Couldn't take a reading" is not "service is down."
-4. **Locate latency by comparing both sides** of a call.
-5. **Read the actual error message.** Guessing about the quota problem would have wasted hours; Google's message stated the exact limit and reset time.
-6. **Real constraints shape design.** A 20-requests-per-day limit led to a better architecture: deterministic code for routine steps, AI only for judgment.
+- Verify the agent's conclusions. The wrong answer read just as confidently as the right one.
+- Test the case where nothing is wrong.
+- Know exactly what a signal measures. A failed scrape is not a dead service.
+- To locate latency, compare both ends of the call.
+- Read the actual error message. The quota error said precisely what the limit was and when it would reset.
+- The 20-request limit pushed the design somewhere better: deterministic code for routine steps, and the model only where judgment is needed.
 
----
-
-## Glossary (plain English)
-
-| Term | Meaning |
-|---|---|
-| **LLM** | Large language model: the kind of AI behind tools like Gemini, Claude, and ChatGPT. |
-| **Agent** | An AI that can take actions (here, calling tools) and decide its next step from the results. |
-| **System prompt** | Standing instructions given to the AI before the conversation: its role, method, and rules. |
-| **Tool / function calling** | The AI asks the program to run a specific tool with specific inputs, then reads the result. |
-| **Triage** | The first quick checks done for every problem, like a nurse taking vital signs. |
-| **Token** | The unit AI models read and are billed by; roughly 4 characters. |
-| **Rate limit / quota** | A cap on how many requests you can make per minute or per day. |
-| **HTTP 429** | The standard error code for "too many requests." |
-| **Thought signature** | An encrypted record of the model's internal reasoning that must be sent back unchanged between steps. |
-| **Reconciliation** | Settling uncertain orders by checking the payment records, the source of truth. |
-| **Root cause** | The underlying reason for a problem, as opposed to its symptoms (slowness and errors are symptoms). |
-
----
-
-## How to run it yourself
+## Running it
 
 ```bash
-# one-time: put a Gemini API key in .env (never commit it)
 echo ".env" >> .gitignore
-printf 'GEMINI_API_KEY=%s\n' "$(pbpaste)" > .env
+printf 'GEMINI_API_KEY=%s\n' "$(pbpaste)" > .env    # key copied to clipboard first
 echo "GEMINI_MODEL=gemini-3.8-flash" >> .env
 
-# investigate
 ./scripts/investigate.sh "Routine check: is the order system healthy right now?" 10
 ./scripts/investigate.sh "Customers say checkout is slow and some orders fail" 5
 ```
 
-Every investigation is saved in [`investigations/`](../investigations/).
+## Next
 
----
-
-## What happens next
-
-- **Day 5:** a web dashboard: service health at a glance, an "Investigate" button, the AI's steps
-  shown live, and a human-approval step for any recommended action.
-- **Day 6:** evaluation: run every incident from the [Day 2 report](day-2-incidents.md) several
-  times, including ones the agent was never tuned on, and measure how often it finds the right
-  root cause, how fast, and at what cost.
+Day 5 is a dashboard: service health at a glance, an "Investigate" button, the agent's steps as they happen, and an approval step for any action it recommends. Day 6 is the evaluation: every incident from [Day 2](day-2-incidents.md), run several times, including the ones the agent wasn't tuned on, measuring accuracy, time, and cost.

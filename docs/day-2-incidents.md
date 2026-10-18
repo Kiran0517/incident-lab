@@ -1,337 +1,147 @@
-# Day 2 Report: Breaking Things on Purpose (Incident Postmortems)
+# Day 2: Breaking things on purpose
 
-> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md) · [Day 4: The AI investigator goes live](day-4-ai-agent.md)
->
-> **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
-
-## The short version
-
-- I broke the store in **three planned ways** while 20 simulated customers ordered non-stop:
-  a bad code release, a slow network, and a crashed payment service.
-- The system also failed in **four ways I did not plan**: the store sold out, the monitoring tool
-  ran out of memory, the order desk ran out of network connections, and a bug left **119 customers
-  charged for orders that never completed**.
-- I found the real cause of each problem from evidence (timelines, charts, logs, database records),
-  fixed it, and **proved each fix with numbers**.
-- The biggest lesson: **a timeout means "we don't know," not "it failed."** Every timed-out
-  payment I checked had actually gone through.
-
-
-On Day 2, I deliberately broke my system in three different ways while it was handling heavy
-traffic, then investigated each failure the way an on-call engineer would. Along the way, the
-system also failed in **four ways I did not plan**, and those turned out to be the most
-valuable findings.
-
-Each report below follows the format real tech companies use after an outage, called a
-**postmortem**: what happened, who was affected, why it happened, how it was fixed, and what
-was learned. Every number here comes from real measurements, not estimates.
-
-> **Quick refresher:** the system is a small online store with three services: an **order desk**
-> (`order-service`), a **warehouse** (`inventory-service`), and a **cashier** (`payment-service`).
-> See the [Day 1 report](day-1-services-and-observability.md) for the full explanation.
-
----
+[Overview](../README.md) · [Day 1](day-1-services-and-observability.md) · [Day 2](day-2-incidents.md) · [Day 3](day-3-investigator-tools.md) · [Day 4](day-4-ai-agent.md)
 
 ## Summary
 
-| # | Incident | Planned? | Customer impact | Root cause | Fixed? |
+I injected three failures into the system while 20 simulated customers were ordering continuously: a bad deploy, network latency between two services, and a crashed payment service. Along the way the system also failed in four ways I didn't plan for, and those turned out to be the most useful findings. The biggest one: when a payment call times out, you don't actually know whether the customer was charged. In every case I checked, they had been.
+
+Each incident below is written up like a short postmortem: what happened, the impact, the cause, the fix, and what I took away from it. All numbers are from actual runs.
+
+## Overview
+
+| # | Incident | Planned | Impact | Cause | Fixed |
 |---|---|---|---|---|---|
-| A1 | Store sold out | No | Orders rejected | Test data ran out | Yes (restocked) |
-| A2 | Monitoring crashed | No | Lost visibility | Unlimited trace storage | Yes |
-| A3 | Order desk couldn't open connections | No | ~41,000 failed orders | Port exhaustion | Yes |
-| 1 | Bad code release | Yes | Store 41× slower | Missing database index | Yes (rolled back) |
-| 2 | Slow network to payment | Yes | 119 customers charged, orders stuck | Unhandled error type | Yes |
-| 3 | Payment service crash | Yes | 319 orders in unknown state | Crash hidden by proxy | Handled by reconciliation |
+| A1 | Store sold out | No | Orders rejected | Test data ran out | Restocked |
+| A2 | Jaeger crashed | No | Lost tracing | Unbounded in-memory storage | Yes |
+| A3 | order-service couldn't open connections | No | ~41,000 failed orders | Ephemeral port exhaustion | Yes |
+| 1 | Bad deploy | Yes | 41x drop in throughput | Dropped database index | Rolled back |
+| 2 | Latency to payment | Yes | 119 customers charged, orders stuck | Unhandled exception type | Yes |
+| 3 | Payment service crash | Yes | 319 orders in unknown state | Crash masked by the proxy | Reconciled |
 
----
+## Baseline
 
-## How I measured "healthy" first
+Before breaking anything, I measured normal behavior with k6 (20 virtual users ordering non-stop):
 
-You can't recognize "broken" without knowing what "normal" looks like. I used **k6**, a
-professional load-testing tool, to simulate 20 customers ordering non-stop.
-
-| Measurement | Healthy value |
+| Metric | Value |
 |---|---|
-| Orders processed per second | ~1,200 |
-| 95% of orders finished within | ~45 ms (0.045 seconds) |
+| Throughput | ~1,200 orders/sec |
+| p95 latency | ~45 ms |
 | Success rate | 100% |
 
-**"p95"** means 95% of requests were at least this fast. Engineers use it instead of averages
-because averages hide the slow experiences that frustrate real customers.
+p95 means 95% of requests finished at least that fast. It's more useful than an average, because averages hide the slow requests that customers actually notice.
 
----
+## Incident A: the test that went wrong in three ways I didn't expect
 
-## Incident A: The test that went wrong in three unexpected ways
+The plan was to ship a bad deploy while traffic was flowing. Instead, 67% of orders failed, and they failed *fast*, which didn't fit a slow system at all. When the evidence doesn't fit the theory, the theory is wrong, so I rebuilt the timeline from the database.
 
-### In plain English
-
-I planned to ship a bad code change while traffic was flowing and watch it slow the system
-down. Instead, 67% of orders failed, but they failed **instantly**, which didn't match what a
-slow system looks like. When something doesn't fit your theory, the theory is wrong.
-So I investigated, the way a detective rebuilds a timeline from evidence.
-
-### The real timeline (all times UTC)
-
-| Time | What happened | How I know |
+| Time (UTC) | What happened | Evidence |
 |---|---|---|
-| 22:03 | Load test starts, orders succeed | 119,407 confirmed orders that minute |
-| 22:04 | **The store sold out** | Stock = 0 for all products; 82,183 rejections |
-| ~22:04 | **The monitoring tool (Jaeger) crashed** | Container exit code 137 (killed for using too much memory) |
-| 22:05–22:06 | **Order desk couldn't open connections** | ~41,000 failed orders: "Cannot assign requested address" |
+| 22:03 | Load test starts | 119,407 confirmed orders that minute |
+| 22:04 | Store sells out | Stock = 0 for every SKU; 82,183 rejections |
+| ~22:04 | Jaeger crashes | Container exited with code 137 (killed for memory) |
+| 22:05–22:06 | order-service can't open connections | ~41,000 failures with `Cannot assign requested address` |
 | ~22:07 | Load test ends | |
-| 22:07:56 | The bad code change is deployed | Deployment log |
+| 22:07:56 | Bad deploy goes out | Deployments table |
 
-**The key insight:** the bad deploy happened **after** the traffic stopped. It caused none of
-these failures, even though it was the most obvious suspect. A careless investigation
-(human or AI) would have blamed it. **Checking exact timestamps proved it innocent.**
+The deploy happened *after* the traffic stopped. It caused none of this, even though it was the obvious suspect. Without exact timestamps I would have blamed it.
 
-### A1: The store sold out
+**A1, sold out.** Each product started with 100,000 units. Earlier runs sold about 94,000 and this one sold the remaining 206,011, which adds up to the full 300,000. Rejections are fast, which explains the instant failures. I restocked to 10 million per product.
 
-Each product started with 100,000 units. Earlier tests had sold about 94,000; this test sold
-the remaining 206,011. Total: ~300,000, exactly the starting stock. Rejections are fast
-("sorry, sold out"), which explained the instant failures.
+**A2, Jaeger out of memory.** Jaeger's all-in-one image keeps every trace in memory with no limit. Around 600,000 requests at ten spans each was enough for the OS to kill it. That's a real problem, since monitoring tends to fall over exactly when traffic is highest. I capped it at the newest 50,000 traces.
 
-**Fix:** restocked to 10 million units per product.
+**A3, port exhaustion.** Every outgoing connection needs a local port, and there are only about 28,000 of them. After a connection closes, its port sits in TIME_WAIT for roughly a minute before it can be reused. The HTTP client I started with (`HttpURLConnection`) only keeps a handful of idle connections per host, so at about 2,600 requests/sec it kept opening new connections faster than ports were freed, until none were left. I switched to the JDK `HttpClient`, which pools and reuses connections.
 
-### A2: The monitoring tool ran out of memory
+## Incident 1: a "harmless" cleanup that made the store 41x slower
 
-Jaeger (the request-timeline tool) stores every timeline in memory with no limit by default.
-About 600,000 orders × 10 steps each was too much, and the operating system killed it.
+The day before, I added an idempotency check to inventory: before reserving stock, it checks whether this order already has a reservation, so a retried request can't reserve twice. The check is fast because `reservations.order_ref` is indexed.
 
-**Why it matters:** during a real outage, this is exactly when you need monitoring most,
-and it's exactly when heavy traffic is most likely to knock it over.
+Then I shipped a commit titled *"drop unused index to reduce write overhead."* Teams make changes like this all the time. The index wasn't unused, though, and without it every order made PostgreSQL scan all 3 million reservation rows.
 
-**Fix:** limited Jaeger to the newest 50,000 timelines (commit `f5f0508`).
-
-### A3: The order desk ran out of "phone lines" (port exhaustion)
-
-**In plain English:** every time one service calls another, it needs a temporary "return
-address" called a **port**. A computer has only about 28,000 of them. After a connection
-closes, its port stays reserved for about 60 seconds before it can be reused.
-
-The HTTP client I originally used kept only a handful of connections open for reuse. At about
-2,600 requests per second, it kept opening new connections and burning through ports faster
-than they were freed. Eventually there were none left, and every new call failed with
-`Cannot assign requested address`.
-
-It's like a call center that hangs up after every sentence and redials, and each phone line
-must rest for a minute before reuse. Eventually every line is resting.
-
-**This is a classic production incident** that real companies hit when traffic grows.
-
-**Fix:** switched to a client with a proper **connection pool**, which keeps a few connections
-open and reuses them thousands of times (commit `09ccca9`, deployment #4).
-
----
-
-## Incident 1: The "harmless" cleanup that made the store 41× slower
-
-### In plain English
-
-The day before, I added a safety feature: before reserving stock, the warehouse checks
-"have I already reserved stock for this order?" so a retried request can't reserve twice.
-That check is fast because of a database **index**, which works like the index at the back
-of a book: it lets the database jump straight to the right page instead of reading every page.
-
-Then a change was shipped with the message *"drop unused index to reduce write overhead."*
-It sounds reasonable, and teams make this exact change in real life. But the index wasn't
-unused. Without it, every single order forced the database to read **all 3 million past
-reservations** to answer one question.
-
-### Impact
-
-| Measurement | Before | After the bad change | Change |
-|---|---|---|---|
-| One order (no other traffic) | 0.012 s | 0.550 s | ~45× slower |
-| Orders per second (under load) | 1,197 | **29** | **41× fewer** |
-| p95 response time | 45 ms | **1,040 ms** | **23× slower** |
-| Errors | 0% | **0%** | No change! |
-
-### Why "no errors" is the scariest part
-
-The system never "broke": every order eventually succeeded, and health checks said "UP."
-Engineers call this a **brownout**. In real life, customers abandon carts long before a
-page takes over a second, but no error alarm would ever fire. **Only speed and throughput
-measurements revealed it.**
-
-### How the evidence pointed to the cause
-
-1. **Database query plan:** PostgreSQL's own explanation showed a **"Parallel Seq Scan"**
-   (reading every row) taking **1,232 ms**, instead of an instant index lookup.
-2. **Connection pool:** the warehouse has 10 database connections. They were pinned at
-   10/10 with a queue of requests waiting. Each slow query held a connection for ~0.5 s, so
-   everything else waited in line.
-3. **Deployment log:** the slowdown started right after deployment #3, commit `8e9ac25`.
-
-### Fix: rollback
-
-In a real incident, the first priority is to **stop the bleeding**: undo the change, then
-investigate calmly. I used `git revert`, which creates a new commit that undoes the bad one,
-so history shows both the mistake and the fix (commit `c0e5958`, deployment #5).
-
-| After rollback | Value |
-|---|---|
-| Orders per second | **1,227** (fully recovered) |
-| p95 | **36.8 ms** |
-
-### Technical detail
-
-- Query: `SELECT COUNT(*) FROM reservations WHERE order_ref = ?` inside a `@Transactional` method,
-  so the connection is held for the entire slow scan.
-- The failure chain is common: **missing index → slow query → connections held longer →
-  pool exhaustion → request queuing → latency explosion.**
-- Prevention ideas: query-plan checks in CI, alerting on p95 latency (not just errors), and
-  checking index usage stats (`pg_stat_user_indexes`) before dropping any index.
-
----
-
-## Incident 2: Slow network, and customers charged for "failed" orders
-
-### In plain English
-
-This time I changed **no code at all**. I used a tool called **Toxiproxy** (made by Shopify)
-to add 2.5 seconds (± 1 second) of delay to the cashier's replies, simulating a slow network.
-The order desk gives up after waiting 3 seconds.
-
-I expected the slow orders to be marked "failed." Instead, **119 orders were stuck as
-"pending" forever**, with no error message logged anywhere. When I checked further:
-
-> **All 119 customers had been charged.** Their stock was reserved, their payment was taken,
-> they saw an error page, and their order would never complete.
-
-### Why it happened
-
-When the 3-second timer ran out, the newer HTTP client (from the A3 fix) reported the problem
-as a **`CancellationException`**, a type of error my code wasn't expecting. My error handling
-only caught one specific family of errors (`RestClientException`), so this one slipped
-straight past it: no status update, no log line.
-
-**A fix for one bug had quietly created another.** That happens constantly in real software,
-which is why testing under realistic failure conditions matters.
-
-### The deeper lesson: a timeout is not a failure
-
-Even if the error had been caught, marking those orders "failed" would have been **wrong**.
-The cashier *did* charge the card; only the reply was slow. When you time out, you don't know
-what happened. **The honest answer is "unknown."** Payment companies like Stripe design their
-whole APIs around this problem.
-
-### Fix (commit `5d31f5e`, deployment #7)
-
-1. **Catch every error**, so no order is ever left silently stuck.
-2. **Separate "definitely failed" from "unknown":**
-   - Couldn't even connect → the cashier never got the request → **FAILED** (safe: no charge).
-   - Connected, sent the request, then no reply → **PAYMENT_UNKNOWN** (the charge may have happened).
-3. **A reconciliation job** (`scripts/reconcile.sh`, commit `f2a4502`) settles unknown orders
-   by checking the payments table, the source of truth:
-   - payment exists → **CONFIRMED**
-   - no payment → **FAILED**
-
-### Proof the fix works (same incident, re-run)
-
-| Check | Before fix | After fix |
+| Metric | Before | After the deploy |
 |---|---|---|
-| Orders stuck forever | **119** | **0** |
-| Orders honestly marked unknown | 0 | **45** |
-| Unknown orders with a log line | 0 | **45** |
+| Single order, no load | 0.012 s | 0.550 s |
+| Throughput under load | 1,197/s | 29/s |
+| p95 latency | 45 ms | 1,040 ms |
+| Error rate | 0% | 0% |
 
-Then reconciliation resolved all 164 unknown orders (119 old + 45 new): **all 164 had been
-charged** and became CONFIRMED. If they had been marked "failed," 164 paying customers would
-have been told their order failed, and many would have ordered again and been charged twice.
+The part I find most interesting is that last row. Nothing technically failed. Every order eventually went through and health checks stayed green, but in practice customers would have given up long before a checkout took a second. Only latency and throughput showed the problem; error-based alerting would never have fired.
 
-### Ruling out the deploy
+**How the evidence pointed to the cause:**
 
-The last deployment (#6) was at 22:43:29. Traffic ran healthy from ~22:46:40 until the delay
-was injected at 22:47:39. More than 4 minutes passed with healthy traffic in between, so
-the deploy was not the cause.
+1. `EXPLAIN ANALYZE` showed a parallel sequential scan taking 1,232 ms instead of an index lookup.
+2. HikariCP metrics showed inventory's 10 connections pinned at 10/10 with requests queuing, because each slow query held a connection for about half a second.
+3. The deployments table showed the slowdown started right after deploy #3 (commit `8e9ac25`).
 
----
+The chain is a common one: missing index, slow query, connections held longer, pool exhausted, requests queue, latency explodes.
 
-## Incident 3: The cashier crashed
+**Fix.** I rolled back first and investigated second, using `git revert` so the history keeps both the mistake and the fix (commit `c0e5958`). Throughput recovered to 1,227/s with p95 at 36.8 ms. To prevent this in a real codebase, I'd check query plans in CI, alert on p95 instead of only errors, and look at `pg_stat_user_indexes` before dropping any index.
 
-### In plain English
+## Incident 2: slow network, and customers charged for orders that never completed
 
-I stopped the payment service completely for about 30 seconds while orders were flowing.
+No code change this time. I used Toxiproxy to add 2.5 s (± 1 s) of latency to payment-service's responses. order-service gives up after 3 seconds.
 
-**Prediction (made before running it):** these orders would *not* be marked "failed," because
-the order desk doesn't talk to the cashier directly. It talks to Toxiproxy, which was still
-running. From the order desk's view: "I connected, sent the request, and got cut off," which
-is indistinguishable from a slow network. Real load balancers and proxies hide crashes the
-same way.
+I expected the slow orders to end up `FAILED`. Instead, 119 orders were stuck in `PENDING` with no log line at all. When I checked further, all 119 had both a stock reservation and a captured payment. Those customers were charged, saw an error, and had orders that would never complete.
 
-### Results
+**Cause.** When the 3-second timeout fired, the JDK HttpClient (from the A3 fix) surfaced it as a `java.util.concurrent.CancellationException`. My handler only caught `RestClientException`, so this one went straight past it: no status update, no log. A fix for one bug had created another.
+
+**The more important lesson** is that even if the exception had been caught, `FAILED` would have been the wrong status. The payment had gone through and only the reply was slow. After a timeout you don't know the outcome, and the honest status is "unknown." Payment APIs like Stripe's are designed around this with idempotency keys.
+
+**Fix** (commit `5d31f5e`):
+
+1. Catch every exception on the downstream calls, so no order can be left silently stuck.
+2. Separate "definitely failed" from "unknown." If the connection was refused, payment never got the request, so the order is `FAILED`. If the request was sent and then timed out, the order is `PAYMENT_UNKNOWN`.
+3. A reconciliation job (`scripts/reconcile.sh`) settles unknown orders against the payments table: a payment exists, so the order is `CONFIRMED`; no payment, so it's `FAILED`.
+
+Re-running the same incident after the fix:
+
+| | Before | After |
+|---|---|---|
+| Orders stuck in PENDING | 119 | 0 |
+| Orders marked PAYMENT_UNKNOWN | 0 | 45 |
+| Matching log lines | 0 | 45 |
+
+Reconciliation then resolved all 164 uncertain orders (119 old and 45 new), and every one of them had been charged. Marking them failed would have told 164 paying customers their order didn't go through, and some of them would have ordered again.
+
+I also checked that the last deploy (#6, at 22:43:29) wasn't involved. Traffic ran cleanly from about 22:46:40 until I injected the latency at 22:47:39.
+
+## Incident 3: payment service crash
+
+I stopped payment-service for about 30 seconds while orders were flowing.
+
+Before running it, I expected these orders would *not* be marked `FAILED`. order-service doesn't talk to payment-service directly; it talks to Toxiproxy, which was still up. From order-service's side, it connected, sent the request, and got cut off, which looks exactly like a timeout. Load balancers and proxies hide crashes the same way.
 
 | | Value |
 |---|---|
-| Crash window | 22:58:19 to 22:58:50 UTC (+ ~8 s restart) |
+| Crash window | 22:58:19 to 22:58:50 UTC, plus ~8 s to restart |
 | Failed requests | 319 |
-| Marked "could not connect" | **0** (the prediction was right: the proxy masked it) |
-| Marked PAYMENT_UNKNOWN | **319** |
+| Marked "could not connect" | 0 |
+| Marked PAYMENT_UNKNOWN | 319 |
 
-### Reconciliation found a surprise
+Reconciliation then found 220 of those customers had been charged and 99 hadn't. Even with the service "down," most of the in-flight requests had already been processed; my best explanation is requests caught mid-shutdown and mid-restart, where the charge was saved but the response never made it back. A rule like "service down means no charge" would have been wrong for 220 people.
 
-| Outcome | Orders |
-|---|---|
-| Actually charged → CONFIRMED | **220** |
-| Not charged → FAILED | **99** |
+## What I took away from this
 
-Even though the cashier "crashed," **220 customers were actually charged.** The most likely
-explanation: requests caught mid-flight during shutdown and restart, where the payment was
-saved but the reply never made it back. Any rule like "service down = customer not charged"
-would have been wrong for 220 people. The reconciliation job, which checks the real payment
-records instead of guessing, got every one of them right.
+- The obvious suspect isn't always guilty. Exact timestamps cleared the deploy in Incident A.
+- Fast failures and slow failures usually have different causes.
+- Zero errors doesn't mean healthy. The worst incident here had none.
+- Averages hide incidents. A 72-second outage looked like 99.86% success over a 3-minute run.
+- A timeout means "unknown," not "failed."
+- Fixes can introduce new bugs, and re-running the same failure test is how you catch them.
+- Monitoring can fail too, usually at the worst moment.
 
----
-
-## What I learned
-
-1. **The obvious suspect isn't always guilty.** A deploy right before an outage looks guilty,
-   but exact timestamps proved it innocent in Incident A.
-2. **Fast failures and slow failures have different causes.** Instant errors pointed to
-   rejections and connection problems; slow responses pointed to an overloaded database.
-3. **No errors doesn't mean healthy.** The worst incident (41× slower) had zero errors.
-4. **Averages hide incidents.** A 72-second outage looked like "99.86% success" over 3 minutes.
-5. **A timeout means "unknown," not "failed."** Every timed-out payment I checked had
-   actually been charged.
-6. **Fixes can create new bugs.** The connection-pool fix introduced the stuck-order bug.
-7. **Your monitoring can fail too,** usually at the worst possible moment.
-
----
-
-## What this means for the AI investigator
-
-Each incident becomes a **test case** with a known correct answer. The AI agent will get
-access to the same evidence I used (metrics, traces, logs, deployment history, and code
-changes) and must reach the right conclusion:
-
-| Scenario | Correct answer the AI must reach | Trap it must avoid |
-|---|---|---|
-| Bad deploy | Commit `8e9ac25` dropped an index; roll back | Blaming the database itself |
-| Slow network | Payment latency; **not** a deploy | Blaming deploy #6, which happened minutes earlier |
-| Crash | Payment unavailable; reconcile unknown orders | Assuming "crash = nobody was charged" |
-| Sold out | Stock exhausted; not a system fault | Blaming the deploy that happened at the same time |
-
-Measuring how often the AI gets these right is what will make this project credible.
-
----
-
-## Deployment history (Day 2)
+## Deploy history
 
 | # | Commit | Change |
 |---|---|---|
-| 1 | `3698894` | Load testing + deployment tracking |
-| 2 | `010b360` | Feature: idempotent stock reservations |
-| 3 | `8e9ac25` | **Bad change:** dropped the reservations index |
-| 4 | `09ccca9` | Fix: pooled HTTP client (port exhaustion) |
-| 5 | `c0e5958` | **Rollback** of #3 |
-| 6 | `de14693` | Route payment traffic through Toxiproxy |
-| 7 | `5d31f5e` | Fix: handle all errors; PAYMENT_UNKNOWN status |
+| 1 | `3698894` | Load testing and deploy tracking |
+| 2 | `010b360` | Idempotent stock reservations |
+| 3 | `8e9ac25` | Dropped the reservations index (the bad deploy) |
+| 4 | `09ccca9` | Pooled HTTP client (port exhaustion fix) |
+| 5 | `c0e5958` | Rollback of #3 |
+| 6 | `de14693` | Routed payment traffic through Toxiproxy |
+| 7 | `5d31f5e` | Catch all downstream errors; PAYMENT_UNKNOWN status |
 
----
+## Next
 
-## What happened next
-
-On Day 3, I built the tools an AI investigator uses to look at the system: the same charts,
-timelines, logs, and change history I used by hand in this report.
-
-**Continue reading:** [Day 3 Report: The AI's investigation tools](day-3-investigator-tools.md)
+These incidents become the test cases for the AI agent, since the correct answers are known. On Day 3 I built the tools it uses to look at the system. Continue with [Day 3](day-3-investigator-tools.md).
