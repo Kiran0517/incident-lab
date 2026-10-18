@@ -17,8 +17,8 @@ and the AI investigates **live telemetry**, not pre-written fake logs with the a
 | Day 1 | Microservices + full observability (traces, metrics, logs) | ✅ Done | [Day 1 report](docs/day-1-services-and-observability.md) |
 | Day 2 | Real failure injection, investigation, and fixes | ✅ Done | [Day 2 report](docs/day-2-incidents.md) |
 | Day 3 | Read-only investigation tools for the AI agent | ✅ Done | [Day 3 report](docs/day-3-investigator-tools.md) |
-| Day 4 | AI agent loop (LLM tool calling, root-cause report) | 🔜 Next | |
-| Day 5 | Dashboard with human-approved actions | Planned | |
+| Day 4 | AI agent: investigates live incidents with Gemini tool calling | ✅ Done | [Day 4 report](docs/day-4-ai-agent.md) |
+| Day 5 | Dashboard with human-approved actions | 🔜 Next | |
 | Day 6 | Evaluation: measure how often the AI finds the right root cause | Planned | |
 
 ## Reports
@@ -32,6 +32,8 @@ each section starts in plain English, then gives the technical detail. Read them
    three planned failures, four unplanned ones, how each was investigated and fixed.
 3. **[Day 3: The AI investigator's tools](docs/day-3-investigator-tools.md)**:
    the 8 tools that let an AI look at the system safely, and what testing them revealed.
+4. **[Day 4: The AI investigator goes live](docs/day-4-ai-agent.md)**:
+   the AI investigates real incidents: one partly wrong answer, how it was proven wrong, and the fix.
 
 ## Architecture
 
@@ -46,7 +48,8 @@ Observability:  OpenTelemetry agent ──▶ Jaeger (request traces)
                 Prometheus ◀── scrapes each service (latency, errors, DB pool)
                 Structured JSON logs, every line tagged with its trace ID
 Change history: deployments table (service, git commit, time) for every deploy
-Investigator:   Python tools that read all of the above (read-only) for the AI agent
+Investigator:   Python tools that read all of the above (read-only)
+AI agent:       Gemini model that calls those tools step by step and writes a root-cause report
 ```
 
 ## Tech stack
@@ -58,6 +61,7 @@ Investigator:   Python tools that read all of the above (read-only) for the AI a
 | Observability | OpenTelemetry, Jaeger, Prometheus, Grafana, structured logging |
 | Reliability testing | k6 (load), Toxiproxy (network faults) |
 | Investigator | Python 3.12, Prometheus/Jaeger HTTP APIs, Docker SDK, psycopg |
+| AI agent | Google Gemini API (gemini-3.8-flash, free tier), function calling, structured JSON output |
 | Infrastructure | Docker, Docker Compose |
 
 ## Quick start
@@ -67,6 +71,7 @@ docker compose up --build -d          # start everything (first build: ~5-10 min
 ./scripts/load-test.sh 20 30s         # 20 virtual users ordering for 30 seconds
 ./scripts/tool.sh list                # list the investigation tools
 ./scripts/tool.sh call get_service_overview '{"minutes": 5}'
+./scripts/investigate.sh "Customers say checkout is slow" 5   # AI investigation (needs GEMINI_API_KEY in .env)
 ```
 
 | UI | URL |
@@ -84,6 +89,7 @@ docker compose up --build -d          # start everything (first build: ~5-10 min
 | `scripts/deploy.sh <service>` | Rebuild and restart a service, and record the deployment |
 | `scripts/reconcile.sh` | Settle orders whose payment outcome is unknown |
 | `scripts/tool.sh` | Run the AI investigator's tools by hand |
+| `scripts/investigate.sh "<problem>" [minutes]` | Ask the AI agent to investigate; the report is saved in `investigations/` |
 
 ## Highlights so far (real measurements)
 
@@ -96,5 +102,11 @@ docker compose up --build -d          # start everything (first build: ~5-10 min
   actually been charged; a reconciliation job now settles them against the payment records.
 - **Investigator tools:** 32,055 log lines compressed into 3 meaningful groups; overview output
   33% smaller for the AI; malicious input (`8e9ac25; rm -rf /`) rejected by validation.
+- **AI agent:** correctly reported a healthy system (28,205 orders reported = 28,205 sent). On a live
+  network slowdown, its first answer blamed the wrong service; I disproved it with 3 independent
+  checks, improved the agent with general troubleshooting rules, and the re-run found the correct
+  root cause (payment service answered in 0.28 s while its caller waited 3+ s). Accuracy on unseen
+  incidents is measured next.
 
-Full details: [Day 2 report](docs/day-2-incidents.md) and [Day 3 report](docs/day-3-investigator-tools.md).
+Full details: [Day 2 report](docs/day-2-incidents.md), [Day 3 report](docs/day-3-investigator-tools.md),
+and [Day 4 report](docs/day-4-ai-agent.md).

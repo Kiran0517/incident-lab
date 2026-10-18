@@ -1,6 +1,6 @@
 # Day 3 Report: The AI Investigator's Tools
 
-> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md)
+> **Incident Lab reports:** [Project overview](../README.md) · [Day 1: Services & monitoring](day-1-services-and-observability.md) · [Day 2: Breaking things on purpose](day-2-incidents.md) · [Day 3: The AI's investigation tools](day-3-investigator-tools.md) · [Day 4: The AI investigator goes live](day-4-ai-agent.md)
 >
 > **Who this is for:** anyone, technical or not. Each section starts with a plain-English explanation, then gives the technical detail for engineers.
 
@@ -191,9 +191,10 @@ These are real signals in the data that a careless investigator would misread:
 
 Code: [`investigator/`](../investigator/) (Python 3.12, runs in Docker with read-only access to the repo).
 
-## What happens next (Day 4)
+## What happened next
 
-The AI agent itself: it receives "something is wrong," decides which tool to call, reads the result,
-decides the next step, and finally writes a root-cause report with the evidence behind it.
-Its accuracy will then be measured against the incidents from the
-[Day 2 report](day-2-incidents.md), where the correct answers are already known.
+On Day 4, I connected an AI model to these tools. It investigated a healthy system correctly,
+got a live incident partly wrong on the first try, and found the correct root cause after
+improvements.
+
+**Continue reading:** [Day 4 Report: The AI investigator goes live](day-4-ai-agent.md)
