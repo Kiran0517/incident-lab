@@ -2,6 +2,7 @@
 
 Uses plain HTTP instead of an SDK so every request and response is easy to inspect.
 """
+import os
 import sys
 import time
 
@@ -28,6 +29,15 @@ class GeminiClient:
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        # Free tiers allow only a few requests per minute; spacing calls avoids most 429 errors.
+        self.min_interval = float(os.getenv("GEMINI_MIN_INTERVAL_SECONDS", "6"))
+        self._last_call = 0.0
+
+    def _pace(self):
+        wait = self.min_interval - (time.time() - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.time()
 
     def generate(self, system: str, contents: list, tools: list = None, allow_tools: bool = True) -> dict:
         body = {
@@ -40,6 +50,7 @@ class GeminiClient:
             if not allow_tools:
                 body["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
         for attempt in range(4):
+            self._pace()
             resp = requests.post(
                 f"{API}/models/{self.model}:generateContent",
                 headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},

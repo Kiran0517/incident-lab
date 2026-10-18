@@ -41,15 +41,19 @@ def _summarize(points, max_samples: int = 8) -> dict:
         return {"no_data": True}
     values = [v for _, v in points]
     peak_ts, peak = max(points, key=lambda p: p[1])
+    low_ts, low = min(points, key=lambda p: p[1])
     stride = max(1, math.ceil(len(points) / max_samples))
-    return {
-        "min": round(min(values), 3),
+    summary = {
+        "min": round(low, 3),
         "max": round(peak, 3),
         "avg": round(sum(values) / len(values), 3),
         "last": round(values[-1], 3),
         "peak_at": _iso(peak_ts),
-        "samples": [] if min(values) == peak else [f"{_iso(t)[11:19]} {round(v, 2)}" for t, v in points[::stride]],
+        "samples": [] if low == peak else [f"{_iso(t)[11:19]} {round(v, 2)}" for t, v in points[::stride]],
     }
+    if low != peak:
+        summary["lowest_at"] = _iso(low_ts)
+    return summary
 
 
 def query_metrics(promql: str, minutes: int = 15, step_seconds: int = 15) -> dict:
@@ -99,9 +103,14 @@ def get_service_overview(minutes: int = 15) -> dict:
         "services": services,
         "order_service_dependency_avg_latency_ms": dependency_latency,
         "notes": [
-            "up: 1 = Prometheus can scrape the service, 0 = unreachable.",
+            "up: 1 = Prometheus scraped the service successfully, 0 = a scrape failed. A failed scrape is NOT "
+            "proof the service is down: check whether it is still handling requests and completing work.",
+            "Compare order_service_dependency_avg_latency_ms for a dependency with that dependency's own "
+            "p95_latency_ms. If the caller waits far longer than the dependency itself takes to respond, the time "
+            "is being lost in the network or proxy between them, not inside the dependency.",
             "db_pool_active near db_pool_max with db_pool_pending > 0 means the DB connection pool is exhausted.",
             "In dependency latency, 'toxiproxy' is the network proxy in front of payment-service.",
+            "Rates use 1-minute windows, so bursts shorter than a minute look smaller than they were.",
             "no_data usually means no traffic of that kind in the window.",
         ],
     }

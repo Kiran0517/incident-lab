@@ -8,7 +8,8 @@ STATUS_MEANINGS = {
     "REJECTED": "Inventory refused: insufficient stock or unknown product (business outcome, not a system fault).",
     "FAILED": "A dependency failed and the customer was NOT charged.",
     "PAYMENT_UNKNOWN": "Payment call timed out or was cut off; the customer MAY have been charged. Needs reconciliation.",
-    "PENDING": "Still in progress. PENDING older than a few seconds means the order got stuck.",
+    "PENDING": "In progress. New orders are briefly PENDING while they are processed (one per active customer). "
+               "Only PENDING orders older than 30 seconds are stuck: see stuck_pending_orders.",
 }
 
 
@@ -21,6 +22,9 @@ def get_order_outcomes(minutes: int = 15) -> dict:
             (int(minutes),),
         ).fetchall()
         stock = conn.execute("SELECT sku, stock FROM products ORDER BY sku").fetchall()
+        stuck = conn.execute(
+            "SELECT count(*) FROM orders WHERE status = 'PENDING' AND created_at < now() - interval '30 seconds'"
+        ).fetchone()[0]
     per_minute = {}
     totals = {}
     for minute, status, count in rows:
@@ -30,6 +34,7 @@ def get_order_outcomes(minutes: int = 15) -> dict:
         "window_minutes": minutes,
         "totals": totals,
         "per_minute": per_minute,
+        "stuck_pending_orders": stuck,
         "stock_levels": {sku: level for sku, level in stock},
         "status_meanings": STATUS_MEANINGS,
     }

@@ -42,6 +42,13 @@ Rules:
 - Distinguish symptoms (high latency, errors) from causes.
 - Business outcomes (orders rejected for unknown products or insufficient stock) are not system faults.
 - An isolated warning that does not line up in time and mechanism with the symptoms is noise.
+- Before concluding that a service is down, check whether it is still doing its work (its request rate,
+  its logs, orders completing). A slow or unreachable path is different from a dead service.
+- When latency is the symptom, locate it: compare how long the caller waits with how long the callee
+  itself takes. The difference is time spent between them.
+- Prefer the explanation that accounts for ALL the evidence, including evidence that contradicts your
+  first idea. Read the "notes" that tools return; they explain how to interpret each field.
+- Efficiency: search ERROR logs first; look at WARN or other filters only if needed.
 - If the evidence is insufficient, say so and use low confidence instead of guessing.
 - If everything looks healthy, say so.
 - Be efficient: usually 4 to 10 tool calls.
