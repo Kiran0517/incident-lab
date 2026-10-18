@@ -63,7 +63,7 @@ def find_traces(service: str, minutes: int = 15, min_duration_ms: int = None,
         "service": service,
         "start": end_us - minutes * 60 * 1_000_000,
         "end": end_us,
-        "limit": max(limit * 5, 50),
+        "limit": max(limit * 20, 200),
     }
     if min_duration_ms:
         params["minDuration"] = f"{int(min_duration_ms)}ms"
@@ -71,7 +71,7 @@ def find_traces(service: str, minutes: int = 15, min_duration_ms: int = None,
         params["tags"] = json.dumps({"error": "true"})
     resp = requests.get(f"{JAEGER_URL}/api/traces", params=params, timeout=15)
     resp.raise_for_status()
-    traces = [t for t in (_summarize_trace(t) for t in resp.json().get("data") or []) if t]
+    traces = [t for t in (_summarize_trace(t) for t in resp.json().get("data") or []) if t and "/actuator" not in t["root"]]
     traces.sort(key=lambda t: t["duration_ms"], reverse=True)
     return {
         "service": service,
