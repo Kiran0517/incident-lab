@@ -40,6 +40,7 @@ TOOLS = {
             "min_duration_ms": {"type": "integer", "description": "Only traces at least this slow"},
             "errors_only": {"type": "boolean", "default": False},
             "limit": {"type": "integer", "default": 10},
+            "operation": {"type": "string", "description": "Endpoint to search; defaults to the service's main business endpoint"},
         }},
     },
     "get_trace": {
