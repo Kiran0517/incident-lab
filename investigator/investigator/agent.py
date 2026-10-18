@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from .gemini import GeminiClient, clean_schema
+from .config import SERVICES
 from .registry import TOOLS, call_tool
 
 MAX_RESULT_CHARS = 12000
@@ -27,7 +28,9 @@ The system is an e-commerce backend with three Spring Boot services sharing one 
 You can only observe the system through the provided tools. They are read-only.
 
 Method:
-1. Start with get_service_overview to see what is abnormal and when it started.
+1. Read the initial triage results included with the problem (service overview, recent deployments,
+   order outcomes, and ERROR logs for every service). They are already collected: do not request
+   them again unless you need a different time window. Identify what is abnormal and when it started.
 2. Build a timeline: when did the problem start, and is it still happening?
 3. Check what changed with get_recent_deployments. A deployment can only be the cause if it happened
    BEFORE the problem started and its change plausibly explains the symptoms. If you suspect one,
@@ -48,7 +51,8 @@ Rules:
   itself takes. The difference is time spent between them.
 - Prefer the explanation that accounts for ALL the evidence, including evidence that contradicts your
   first idea. Read the "notes" that tools return; they explain how to interpret each field.
-- Efficiency: search ERROR logs first; look at WARN or other filters only if needed.
+- Efficiency: model calls are limited. When you need several independent pieces of evidence, request
+  multiple tool calls in the same turn. Aim to finish within about 4 turns.
 - If the evidence is insufficient, say so and use low confidence instead of guessing.
 - If everything looks healthy, say so.
 - Be efficient: usually 4 to 10 tool calls.
@@ -97,7 +101,33 @@ def _save(record: dict) -> str:
     return path
 
 
-def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
+def _triage(minutes: int) -> list:
+    """Evidence every investigation needs, gathered up front without spending model calls."""
+    return [
+        ("get_service_overview", {"minutes": minutes}),
+        ("get_recent_deployments", {"minutes": max(60, minutes * 4)}),
+        ("get_order_outcomes", {"minutes": minutes}),
+    ] + [("search_logs", {"service": s, "minutes": minutes, "level": "ERROR", "max_groups": 5})
+         for s in SERVICES]
+
+
+def _run_tool(name: str, args: dict, step: int, steps: list):
+    t0 = time.time()
+    result = call_tool(name, args)
+    text = json.dumps(result, default=str)
+    truncated = len(text) > MAX_RESULT_CHARS
+    if truncated:
+        result = {"truncated": True, "partial_result": text[:MAX_RESULT_CHARS]}
+    steps.append({
+        "step": step, "tool": name, "args": args,
+        "seconds": round(time.time() - t0, 2), "result_chars": len(text),
+        "truncated": truncated,
+        "error": result.get("error") if isinstance(result, dict) else None,
+    })
+    return result
+
+
+def investigate(problem: str, minutes: int = 15, max_steps: int = 8) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise SystemExit("GEMINI_API_KEY is not set. Add it to the .env file in the project root.")
@@ -107,14 +137,23 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
 
     started = time.time()
     now = datetime.now(timezone.utc)
+    steps = []
+    _log("Gathering initial triage (no model calls) ...")
+    triage_text = []
+    for name, args in _triage(minutes):
+        _log(f"  triage: {name} {json.dumps(args)}")
+        result = _run_tool(name, args, 0, steps)
+        triage_text.append(f"### {name} {json.dumps(args)}\n{json.dumps(result, default=str)}")
+
     contents = [{"role": "user", "parts": [{"text": (
         f"Current time (UTC): {now.isoformat(timespec='seconds')}\n"
         f"Reported problem: {problem}\n"
-        f"Investigate the last {minutes} minutes unless the evidence points further back."
+        f"Investigate the last {minutes} minutes unless the evidence points further back.\n\n"
+        "Initial triage (already collected):\n\n" + "\n\n".join(triage_text)
     )}]}]
 
-    steps = []
     usage = {"prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    model_calls = 0
     final_text = ""
     _log(f"Investigating with {model} ...")
 
@@ -126,6 +165,7 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
                 "based on the evidence gathered so far.")}]})
 
         response = client.generate(SYSTEM_PROMPT, contents, declarations, allow_tools=allow_tools)
+        model_calls += 1
         meta = response.get("usageMetadata", {})
         usage["prompt_tokens"] += meta.get("promptTokenCount", 0)
         usage["output_tokens"] += meta.get("candidatesTokenCount", 0) + meta.get("thoughtsTokenCount", 0)
@@ -146,19 +186,8 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
         replies = []
         for call in calls:
             name, args = call.get("name"), call.get("args") or {}
-            _log(f"  step {step}: {name} {json.dumps(args)}")
-            t0 = time.time()
-            result = call_tool(name, args)
-            text = json.dumps(result, default=str)
-            truncated = len(text) > MAX_RESULT_CHARS
-            if truncated:
-                result = {"truncated": True, "partial_result": text[:MAX_RESULT_CHARS]}
-            steps.append({
-                "step": step, "tool": name, "args": args,
-                "seconds": round(time.time() - t0, 2), "result_chars": len(text),
-                "truncated": truncated,
-                "error": result.get("error") if isinstance(result, dict) else None,
-            })
+            _log(f"  turn {step}: {name} {json.dumps(args)}")
+            result = _run_tool(name, args, step, steps)
             replies.append({"functionResponse": {"name": name, "response": result}})
         contents.append({"role": "user", "parts": replies})
 
@@ -170,6 +199,7 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
         "started_at": now.isoformat(timespec="seconds"),
         "duration_seconds": round(time.time() - started, 1),
         "tool_calls": len(steps),
+        "model_calls": model_calls,
         "usage": usage,
         "steps": steps,
         "report": report,
@@ -182,7 +212,7 @@ def investigate(problem: str, minutes: int = 15, max_steps: int = 12) -> dict:
 def format_report(record: dict) -> str:
     r = record.get("report")
     head = (f"Problem: {record['problem']}\n"
-            f"Model: {record['model']} | {record['tool_calls']} tool calls | "
+            f"Model: {record['model']} | {record['model_calls']} model calls | {record['tool_calls']} tool calls | "
             f"{record['duration_seconds']}s | {record['usage']['total_tokens']} tokens")
     if not r:
         return f"{head}\n\nCould not parse a structured report. Raw answer:\n{record.get('raw_final_text')}"

@@ -46,8 +46,13 @@ def main(argv) -> int:
 
     if command == "investigate" and len(argv) >= 3:
         from .agent import format_report, investigate
+        from .gemini import QuotaExhausted
         minutes = int(argv[3]) if len(argv) > 3 else 15
-        record = investigate(argv[2], minutes=minutes)
+        try:
+            record = investigate(argv[2], minutes=minutes)
+        except QuotaExhausted as e:
+            print(f"STOPPED: {e}")
+            return 2
         print(format_report(record))
         return 0
 
